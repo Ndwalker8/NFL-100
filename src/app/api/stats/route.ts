@@ -145,7 +145,6 @@ export async function GET(req: NextRequest) {
     const isGzipMagic =
       fetched.buf.length >= 2 && fetched.buf[0] === 0x1f && fetched.buf[1] === 0x8b;
     const csvBuffer = fetched.gz || isGzipMagic ? gunzipSync(fetched.buf) : fetched.buf;
-
     const rows = parseCsvSync(csvBuffer, { columns: true, skip_empty_lines: true }) as Row[];
 
     if (debug) {
@@ -158,6 +157,17 @@ export async function GET(req: NextRequest) {
     }
 
     const pointsByGsis = new Map<string, number>();
+    const statsByGsis = new Map<
+      string,
+      {
+        pos: "QB" | "RB" | "WR" | "TE";
+        passYds: number; passTD: number; passINT: number;
+        rushYds: number; rushTD: number;
+        rec: number; recYds: number; recTD: number;
+        fumLost: number;
+      }
+    >();
+
     let missingId = 0;
     let matchedRows = 0;
 
@@ -171,21 +181,33 @@ export async function GET(req: NextRequest) {
       matchedRows++;
 
       const gsis = getGsisId(row);
-      if (!gsis) {
-        missingId++;
-        continue;
-      }
+      if (!gsis) { missingId++; continue; }
 
       const pts = computeFantasyPoints(row, mode);
+
       const prev = pointsByGsis.get(gsis);
-      if (prev == null || pts > prev) pointsByGsis.set(gsis, pts);
+      if (prev == null || pts > prev) {
+        pointsByGsis.set(gsis, pts);
+        statsByGsis.set(gsis, {
+          pos: pos as any,
+          passYds: num(row.passing_yards),
+          passTD: num(row.passing_tds),
+          passINT: num(row.passing_interceptions ?? row.interceptions),
+          rushYds: num(row.rushing_yards),
+          rushTD: num(row.rushing_tds),
+          rec: num(row.receptions),
+          recYds: num(row.receiving_yards),
+          recTD: num(row.receiving_tds),
+          fumLost: num(row.fumbles_lost ?? row.fumbles),
+        });
+      }
     }
 
     const seasonUsed = extractSeasonFromUrl(fetched.url);
 
     return NextResponse.json(
       {
-        seasonUsed,                // <— NEW (numeric, e.g. 2024)
+        seasonUsed,
         seasonResolvedFrom: fetched.url,
         week,
         mode,
@@ -196,6 +218,7 @@ export async function GET(req: NextRequest) {
           ...(missingId > 0 ? [`${missingId} rows for week ${week} missing player_id (skipped)`] : []),
         ],
         points: Object.fromEntries(pointsByGsis),
+        stats: Object.fromEntries(statsByGsis),  // <-- NEW
       },
       { status: 200 }
     );

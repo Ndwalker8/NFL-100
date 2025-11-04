@@ -10,6 +10,22 @@ import { Button } from "@/components/ui/button";
 type Mode = "std" | "half" | "ppr";
 type Player = { id: string; name: string; pos: "QB" | "RB" | "WR" | "TE"; team: string | null; active: boolean; };
 type PointsMap = Record<string, number>;
+
+// --- NEW: stat line wiring ---
+type StatLine = {
+  pos: "QB" | "RB" | "WR" | "TE";
+  passYds: number;
+  passTD: number;
+  passINT: number;
+  rushYds: number;
+  rushTD: number;
+  rec: number;
+  recYds: number;
+  recTD: number;
+  fumLost: number;
+};
+type StatsMap = Record<string, StatLine>;
+
 const POS_ORDER: Player["pos"][] = ["QB", "RB", "WR", "TE"];
 
 function useLocal<T>(key: string, init: T) {
@@ -49,6 +65,23 @@ async function autoSeasonWeek(mode: Mode): Promise<{ season: number; week: numbe
   return null;
 }
 
+// --- NEW: small formatter for stat lines shown in UI ---
+function formatStatsBrief(s?: StatLine) {
+  if (!s) return "";
+  const parts: string[] = [];
+  if (s.passYds || s.passTD || s.passINT) {
+    parts.push(`Pass ${s.passYds}y ${s.passTD}TD${s.passINT ? ` ${s.passINT}INT` : ""}`);
+  }
+  if (s.rushYds || s.rushTD) {
+    parts.push(`Rush ${s.rushYds}y ${s.rushTD}TD`);
+  }
+  if (s.rec || s.recYds || s.recTD) {
+    parts.push(`Rec ${s.rec}-${s.recYds}y ${s.recTD}TD`);
+  }
+  if (!parts.length) return "—";
+  return parts.join(" • ");
+}
+
 export default function App() {
   // Persistent controls
   const [season, setSeason] = useLocal<number>("season", 2024);
@@ -60,6 +93,7 @@ export default function App() {
   const [pool, setPool] = useState<Player[]>([]);
   const [loadingPlayers, setLoadingPlayers] = useState(false);
   const [points, setPoints] = useState<PointsMap>({});
+  const [stats, setStats] = useState<StatsMap>({}); // NEW
   const [loadingStats, setLoadingStats] = useState(false);
 
   // Picks
@@ -74,6 +108,7 @@ export default function App() {
 
   // Helpers
   const ptsFor = (gsis: string | null | undefined) => (gsis ? Number(points[gsis] ?? 0) : 0);
+  const statsFor = (gsis: string | null | undefined) => (gsis ? stats[gsis] : undefined);
   const totalNum = ptsFor(qb) + ptsFor(rb) + ptsFor(wr) + ptsFor(te);
   const total = totalNum.toFixed(2);
   const won = totalNum >= target;
@@ -100,7 +135,7 @@ export default function App() {
     return () => { ok = false; };
   }, [season]);
 
-  // Load points for the chosen week/mode
+  // Load points + stats for the chosen week/mode
   useEffect(() => {
     let ok = true;
     (async () => {
@@ -112,17 +147,20 @@ export default function App() {
 
         if (r.ok && j?.points) {
           setPoints(j.points as PointsMap);
+          setStats((j.stats ?? {}) as StatsMap); // NEW
           setSeasonUsed(typeof j.seasonUsed === "number" ? j.seasonUsed : null);
           const msg = Array.isArray(j.warnings) && j.warnings.length ? String(j.warnings[0]) : null;
           setApiWarning(msg);
         } else {
           setPoints({});
+          setStats({});
           setSeasonUsed(null);
           setApiWarning(j?.error ?? null);
         }
       } catch (e) {
         console.error(e);
         setPoints({});
+        setStats({});
         setSeasonUsed(null);
         setApiWarning("Failed to load stats");
       } finally {
@@ -194,41 +232,41 @@ export default function App() {
   }
 
   // Slot component — position-locked + sorted by THIS WEEK's points desc
-  function PlayerSlot({
-    label, pick, setPick, candidates,
-  }: { label: Player["pos"]; pick: string | null; setPick: (v: string | null) => void; candidates: Player[]; }) {
-    const locked = ptsFor(pick) > 0;
-    const options = useMemo(() => {
-      const filtered = candidates.filter((p) => {
-        if (!p.id) return false;
-        if (pick && p.id === pick) return true;
-        return !selectedIds.has(p.id);
-      });
-      filtered.sort((a, b) => {
-        const da = ptsFor(a.id);
-        const db = ptsFor(b.id);
-        if (db !== da) return db - da;
-        return a.name.localeCompare(b.name);
-      });
-      return filtered;
-    }, [candidates, pick, selectedIds, points]);
+function PlayerSlot({
+  label, pick, setPick, candidates,
+}: { label: Player["pos"]; pick: string | null; setPick: (v: string | null) => void; candidates: Player[]; }) {
 
-    const livePts = pick ? ptsFor(pick).toFixed(2) : "0.00";
+  const options = useMemo(() => {
+    const filtered = candidates.filter((p) => {
+      if (!p.id) return false;
+      if (pick && p.id === pick) return true;    // allow the current pick to stay selectable
+      return !selectedIds.has(p.id);
+    });
+    filtered.sort((a, b) => {
+      const da = ptsFor(a.id);
+      const db = ptsFor(b.id);
+      if (db !== da) return db - da;
+      return a.name.localeCompare(b.name);
+    });
+    return filtered;
+  }, [candidates, pick, selectedIds, points]);
 
-    return (
-      <Card className="rounded-2xl shadow-lg backdrop-blur bg-white/70 border border-slate-200 transition hover:shadow-xl">
-        <CardHeader className="pb-1">
-          <div className="flex items-center justify-between">
-            <CardTitle className="text-lg">{label}</CardTitle>
-            <span className="text-xs text-slate-500">Week {week}</span>
-          </div>
-        </CardHeader>
-        <CardContent className="flex items-center gap-3">
-          <Select
-            value={pick ?? ""}
-            onValueChange={(v) => setPick(v || null)}
-            disabled={locked || loadingPlayers}
-          >
+  const livePts = pick ? ptsFor(pick).toFixed(2) : "0.00";
+  const s = statsFor(pick);
+
+  return (
+    <Card className="rounded-2xl shadow-lg backdrop-blur bg-white/70 border border-slate-200 transition hover:shadow-xl">
+      <CardHeader className="pb-1">
+        <div className="flex items-center justify-between">
+          <CardTitle className="text-lg">{label}</CardTitle>
+          <span className="text-xs text-slate-500">Week {week}</span>
+        </div>
+      </CardHeader>
+
+      <CardContent className="space-y-3">
+        {/* Picker row */}
+        <div className="flex items-center gap-3">
+          <Select value={pick ?? ""} onValueChange={(v) => setPick(v || null)} disabled={loadingPlayers}>
             <SelectTrigger className="w-full">
               <SelectValue placeholder={`Select ${label}`} />
             </SelectTrigger>
@@ -257,13 +295,53 @@ export default function App() {
             <div className="tabular-nums font-semibold">{livePts}</div>
           </div>
 
-          {locked ? (
-            <Button variant="secondary" onClick={() => setPick(null)}>Clear</Button>
-          ) : null}
-        </CardContent>
-      </Card>
-    );
-  }
+          {pick ? <Button variant="secondary" onClick={() => setPick(null)}>Clear</Button> : null}
+        </div>
+
+        {/* Stats panel inside the box (only when a player is selected) */}
+        {pick && s && (
+          <div className="rounded-lg border border-slate-200 bg-slate-50/70 px-3 py-2">
+            <div className="grid grid-cols-1 sm:grid-cols-3 gap-3 text-[12px] text-slate-700">
+              {/* Passing */}
+              {(s.passYds || s.passTD || s.passINT) ? (
+                <div>
+                  <div className="font-semibold text-slate-600 mb-0.5">Passing</div>
+                  <div className="tabular-nums">Yds {s.passYds} • TD {s.passTD} • INT {s.passINT}</div>
+                </div>
+              ) : null}
+
+              {/* Rushing */}
+              {(s.rushYds || s.rushTD) ? (
+                <div>
+                  <div className="font-semibold text-slate-600 mb-0.5">Rushing</div>
+                  <div className="tabular-nums">Yds {s.rushYds} • TD {s.rushTD}</div>
+                </div>
+              ) : null}
+
+              {/* Receiving */}
+              {(s.rec || s.recYds || s.recTD) ? (
+                <div>
+                  <div className="font-semibold text-slate-600 mb-0.5">Receiving</div>
+                  <div className="tabular-nums">Rec {s.rec} • Yds {s.recYds} • TD {s.recTD}</div>
+                </div>
+              ) : null}
+
+              {/* If no lines (e.g., TE with only blocking snaps) */}
+              {!(s.passYds || s.passTD || s.passINT || s.rushYds || s.rushTD || s.rec || s.recYds || s.recTD) ? (
+                <div className="text-slate-500">No counting stats recorded.</div>
+              ) : null}
+            </div>
+            {/* Fumbles line (optional) */}
+            {s.fumLost ? (
+              <div className="mt-1 text-[11px] text-rose-700">Fumbles Lost: {s.fumLost}</div>
+            ) : null}
+          </div>
+        )}
+      </CardContent>
+    </Card>
+  );
+}
+
 
   return (
     <div className="min-h-screen relative overflow-hidden">
