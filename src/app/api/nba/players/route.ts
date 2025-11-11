@@ -1,83 +1,68 @@
-// Next.js App Router
-import { NextResponse } from "next/server";
+// Next.js (app router) – NBA players for a given date
+import type { NextRequest } from "next/server";
 
-function toYYYYMMDD(dateStr?: string) {
-  // accept YYYY-MM-DD and convert to ESPN YYYYMMDD (America/New_York)
-  const d = dateStr ? new Date(dateStr + "T12:00:00-05:00") : new Date();
-  const ny = new Intl.DateTimeFormat("en-CA", { timeZone: "America/New_York" })
-    .format(d); // YYYY-MM-DD
-  return ny.replaceAll("-", "");
+function yyyymmddFrom(req: NextRequest): string {
+  const url = new URL(req.url);
+  const q = url.searchParams.get("date"); // accepts YYYY-MM-DD or YYYYMMDD
+  const to8 = (s: string) => s.replaceAll("-", "").slice(0, 8);
+  if (q) return to8(q);
+
+  // default: today in America/New_York
+  const fmt = new Intl.DateTimeFormat("en-CA", { timeZone: "America/New_York", year: "numeric", month: "2-digit", day: "2-digit" });
+  const [y, m, d] = fmt.format(new Date()).split("-");
+  return `${y}${m}${d}`;
 }
 
-export const revalidate = 60; // cache 60s on Vercel
-
-export async function GET(req: Request) {
+export async function GET(req: NextRequest) {
   try {
-    const { searchParams } = new URL(req.url);
-    const dateParam = searchParams.get("date") || undefined;
-    const yyyymmdd = toYYYYMMDD(dateParam);
+    const ymd = yyyymmddFrom(req);
 
-    // ESPN scoreboard (correct host)
-    const sbUrl = `https://site.api.espn.com/apis/site/v2/sports/basketball/nba/scoreboard?dates=${yyyymmdd}`;
-    const sbRes = await fetch(sbUrl, { cache: "no-store" });
-    if (!sbRes.ok) {
-      return NextResponse.json({ error: `scoreboard ${sbRes.status}` }, { status: sbRes.status });
-    }
-    const sb = await sbRes.json();
-    const events: any[] = sb?.events ?? [];
-    if (!events.length) {
-      return NextResponse.json({ players: [] }, { status: 200 });
-    }
+    // 1) Which teams play today?
+    const sbUrl = `https://site.api.espn.com/apis/site/v2/sports/basketball/nba/scoreboard?dates=${ymd}`;
+    const sb = await fetch(sbUrl, { cache: "no-store" });
+    if (!sb.ok) return Response.json({ error: `scoreboard ${sb.status}` }, { status: 502 });
+    const sbJson = await sb.json();
 
-    // Collect unique ESPN team IDs playing that day
-    const teamIds = new Set<string>();
-    for (const ev of events) {
-      const comps = ev?.competitions?.[0]?.competitors ?? [];
-      for (const c of comps) {
-        const id = c?.team?.id;
-        if (id) teamIds.add(String(id));
+    const teamIds: Set<number> = new Set();
+    for (const ev of sbJson?.events ?? []) {
+      const comp = ev?.competitions?.[0];
+      for (const c of comp?.competitors ?? []) {
+        const id = Number(c?.team?.id);
+        if (Number.isFinite(id)) teamIds.add(id);
       }
     }
+    // If no games, return empty list (off days)
+    if (!teamIds.size) return Response.json({ players: [] });
 
-    // Fetch rosters for those teams
-    const players: { id: string; name: string; team: string; posNBA: "G"|"F"|"C" }[] = [];
-
-    const fetches = Array.from(teamIds).map(async (tid) => {
-      const teamUrl = `https://site.api.espn.com/apis/site/v2/sports/basketball/nba/teams/${tid}?enable=logos,roster`;
-      const tRes = await fetch(teamUrl, { cache: "no-store" });
-      if (!tRes.ok) return;
-      const tJson = await tRes.json();
-      const teamName = tJson?.team?.displayName ?? tJson?.team?.name ?? "NBA";
-      const roster = tJson?.team?.athletes ?? tJson?.athletes ?? [];
-
-      for (const group of roster) {
-        const aths = group?.items ?? [];
-        for (const a of aths) {
-          const pid = String(a?.id ?? "");
-          const full = a?.displayName ?? a?.fullName ?? "";
-          if (!pid || !full) continue;
-
-          // Map ESPN position into G/F/C
-          const raw = (a?.position?.abbreviation ?? a?.position?.name ?? "").toUpperCase();
-          let pos: "G"|"F"|"C" = "F";
-          if (raw.includes("G")) pos = "G";
-          else if (raw.includes("C")) pos = "C";
-          else pos = "F";
-
-          players.push({ id: pid, name: full, team: teamName, posNBA: pos });
+    // 2) Pull rosters for each team
+    const players: Array<{ id: string; name: string; team: string; posNBA: "C" | "F" | "G" }> = [];
+    await Promise.all(
+      Array.from(teamIds).map(async (tid) => {
+        const rUrl = `https://site.api.espn.com/apis/site/v2/sports/basketball/nba/teams/${tid}/roster`;
+        const rRes = await fetch(rUrl, { cache: "no-store" });
+        if (!rRes.ok) return;
+        const rJson = await rRes.json();
+        const teamAbbr = rJson?.team?.abbreviation ?? rJson?.team?.shortDisplayName ?? "NBA";
+        for (const grp of rJson?.athletes ?? []) {
+          for (const a of grp?.items ?? []) {
+            const id = String(a?.id ?? "");
+            const name = a?.displayName ?? a?.fullName ?? "";
+            const pos = (a?.position?.abbreviation ?? "").toUpperCase();
+            if (!id || !name) continue;
+            // ESPN uses C / F / G; keep that and let UI map F→PF/SF, G→SG/PG
+            const posNBA = (pos === "C" || pos === "F" || pos === "G") ? pos : ("G" as const);
+            players.push({ id, name, team: teamAbbr, posNBA });
+          }
         }
-      }
-    });
+      })
+    );
 
-    await Promise.all(fetches);
+    // de-dupe just in case
+    const seen = new Set<string>();
+    const unique = players.filter(p => (seen.has(p.id) ? false : (seen.add(p.id), true)));
 
-    // Deduplicate by id (if a player appears twice)
-    const uniq = Array.from(
-      new Map(players.map(p => [p.id, p])).values()
-    ).sort((a, b) => a.name.localeCompare(b.name));
-
-    return NextResponse.json({ players: uniq }, { status: 200 });
-  } catch (err: any) {
-    return NextResponse.json({ error: String(err?.message || err) }, { status: 500 });
+    return Response.json({ players: unique });
+  } catch (e: any) {
+    return Response.json({ error: String(e?.message || e) }, { status: 500 });
   }
 }
