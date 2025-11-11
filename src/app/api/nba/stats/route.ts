@@ -1,7 +1,9 @@
-// Next.js (app router) API route: /api/nba/stats?date=YYYY-MM-DD (optional)
-// Produces { stats: { [playerId]: box }, points: { [playerId]: fp } }
-// using ESPN summary/boxscore per event on the date.
-import { NextResponse } from "next/server";
+// Next.js (App Router) API route: /api/nba/stats?date=YYYY-MM-DD
+import { NextResponse, NextRequest } from "next/server";
+
+export const runtime = "nodejs";
+export const dynamic = "force-dynamic";
+export const revalidate = 0;
 
 const SCOREBOARD = "https://site.api.espn.com/apis/site/v2/sports/basketball/nba/scoreboard";
 const SUMMARY = (eventId: string) =>
@@ -18,13 +20,16 @@ function yyyymmdd(input?: string) {
 }
 
 async function j<T>(url: string, init?: RequestInit): Promise<T> {
-  const r = await fetch(url, { ...init, next: { revalidate: 30 } });
+  const r = await fetch(url, {
+    headers: { "User-Agent": "fantasy-hundred/1.0" },
+    cache: "no-store",
+    next: { revalidate: 0 },
+    ...init,
+  });
   if (!r.ok) throw new Error(`${url} ${r.status}`);
   return r.json() as Promise<T>;
 }
 
-// Very simple fantasy formula (tweak as you like)
-// Pts + 1.2*Reb + 1.5*Ast + 3*Stl + 3*Blk - 1*TOV + 0.5*3PM
 function fpts(s: any) {
   const n = (x: any) => (typeof x === "number" ? x : Number(x || 0));
   return (
@@ -38,46 +43,40 @@ function fpts(s: any) {
   );
 }
 
-export async function GET(req: Request) {
+export async function GET(req: NextRequest) {
   try {
-    const { searchParams } = new URL(req.url);
-    const dateParam = searchParams.get("date") || undefined;
+    const dateParam = req.nextUrl.searchParams.get("date") || undefined;
     const compact = yyyymmdd(dateParam);
 
     const sb = await j<any>(`${SCOREBOARD}?dates=${compact}`);
     const events: any[] = sb?.events ?? [];
     if (!events.length) {
-      return NextResponse.json({ stats: {}, points: {} }, { status: 200 });
+      return NextResponse.json({
+        stats: {},
+        points: {},
+        meta: { usedDate: dateParam ?? "today", events: 0, eventsProcessed: 0, sampleErrors: [] },
+      });
     }
 
     const stats: Record<string, any> = {};
     const points: Record<string, number> = {};
+    let eventsProcessed = 0;
+    const sampleErrors: Array<{ eventId: string; err: string }> = [];
 
-    // Pull each event's summary and walk the boxscore players
     await Promise.all(
       events.map(async (ev) => {
+        const evId = String(ev?.id ?? ev?.uid ?? "");
+        if (!evId) return;
         try {
-          const evId = String(ev?.id ?? ev?.uid ?? "");
-          if (!evId) return;
           const sum = await j<any>(SUMMARY(evId));
-
-          // Boxscore shape varies; ESPN exposes "boxscore" -> "players" grouped by team
-          const box = sum?.boxscore?.players ?? [];
-          for (const teamBlock of box) {
-            for (const at of teamBlock?.statistics ?? []) {
-              // Some variants use teamBlock.athletes
-            }
+          const teams = sum?.boxscore?.players ?? [];
+          for (const teamBlock of teams) {
             for (const athlete of teamBlock?.athletes ?? []) {
               const a = athlete?.athlete;
               if (!a?.id) continue;
               const id = `nba:${a.id}`;
+              const line: any = { pts: 0, reb: 0, ast: 0, stl: 0, blk: 0, tov: 0, fg3m: 0, min: 0 };
 
-              // Merge stat lines across sections, normalizing keys
-              const line: any = {
-                pts: 0, reb: 0, ast: 0, stl: 0, blk: 0, tov: 0, fg3m: 0, min: 0,
-              };
-
-              // ESPN presents stats as arrays of {name, value}
               for (const sect of athlete?.stats ?? []) {
                 for (const s of sect?.stats ?? []) {
                   const name = (s?.name || "").toLowerCase();
@@ -105,13 +104,18 @@ export async function GET(req: Request) {
               });
             }
           }
-        } catch {
-          // ignore event failures; continue
+          eventsProcessed++;
+        } catch (e: any) {
+          if (sampleErrors.length < 4) sampleErrors.push({ eventId: evId, err: String(e?.message || e) });
         }
       })
     );
 
-    return NextResponse.json({ stats, points }, { status: 200 });
+    return NextResponse.json({
+      stats,
+      points,
+      meta: { usedDate: dateParam ?? "today", events: events.length, eventsProcessed, sampleErrors },
+    });
   } catch (e: any) {
     return NextResponse.json({ error: String(e?.message || e) }, { status: 500 });
   }

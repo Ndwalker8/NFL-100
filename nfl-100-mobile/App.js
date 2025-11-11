@@ -27,13 +27,10 @@ import { supabase } from "./lib/supabase";
 
 /** ---- App level constants ---- */
 const BASE_URL =
-  Constants.expoConfig?.extra?.EXPO_PUBLIC_API_URL ??
-  process.env.EXPO_PUBLIC_API_URL ??
-  (Platform.select({
-    ios: "http://localhost:3000",
-    android: "http://10.0.2.2:3000",
-    default: "http://192.168.0.137:3000",
-  }));
+  Constants.expoConfig?.extra?.EXPO_PUBLIC_API_URL
+  || process.env.EXPO_PUBLIC_API_URL
+  || "https://nfl-100.vercel.app"; // mobile hits deployed API by default
+
 const MODE = "ppr";
 const POS_ORDER = ["QB", "RB", "WR", "TE"];
 const REG_WEEKS = 18;
@@ -60,6 +57,8 @@ function GradientHeader({ children }) {
     </LinearGradient>
   );
 }
+
+
 
 /** ---- Root ---- */
 export default function App() {
@@ -945,8 +944,8 @@ function PickScreen({ goBack, draft, setDraft }) {
     setDraft(prev => ({ ...prev, [pos]: id }));
   };
 
+  // FIX: don't call useAuth() here—use the hook value captured above
   const shareLineup = async () => {
-    const { user } = useAuth();
     if (!user) return setAuthOpen(true);
     if (!pickQB || !pickRB || !pickWR || !pickTE) return alert("Pick all 4 positions first.");
     const { error } = await supabase.from("lineups").insert({
@@ -1123,8 +1122,15 @@ function HeaderTotal({ value }) {
 function PickScreenNBA({ goBack }) {
   const POS_NBA = ["C", "PF", "SF", "SG", "PG"];
 
-  const todayISO = new Date().toISOString().slice(0,10);
-  const [date, setDate] = useState(todayISO);
+  // today's date in ET (YYYY-MM-DD)
+  function todayInET() {
+    const fmt = new Intl.DateTimeFormat("en-CA", {
+      timeZone: "America/New_York",
+      year: "numeric", month: "2-digit", day: "2-digit",
+    });
+    return fmt.format(new Date());
+  }
+  const [date, setDate] = useState(todayInET());
 
   const [players, setPlayers] = useState([]);
   const [points, setPoints] = useState({});
@@ -1144,16 +1150,24 @@ function PickScreenNBA({ goBack }) {
   // Combined loader for players + stats for the selected date
   const getData = async () => {
     try {
-      const today = date || new Date().toISOString().slice(0, 10);
+      const d = (date || todayInET());
 
-      // Load players for the date (backend may filter by availability)
-      const playersRes = await fetch(`${BASE_URL}/api/nba/players?date=${encodeURIComponent(today)}`);
-      const playersJson = await playersRes.json();
+      // Load players (defensive parsing)
+      const playersRes = await fetch(`${BASE_URL}/api/nba/players?date=${encodeURIComponent(d)}`);
+      const playersTxt = await playersRes.text();
+      let playersJson = {};
+      try { playersJson = JSON.parse(playersTxt); }
+      catch { throw new Error(`players JSON parse error: ${playersTxt.slice(0,140)}`); }
       if (playersRes.ok) setPlayers(playersJson.players || []);
+      else throw new Error(playersJson?.error || "Failed to load players");
 
-      // Load stats for the date
-      const statsRes = await fetch(`${BASE_URL}/api/nba/stats?date=${encodeURIComponent(today)}`);
-      const statsJson = await statsRes.json();
+      // Load stats (defensive parsing)
+      const statsRes = await fetch(`${BASE_URL}/api/nba/stats?date=${encodeURIComponent(d)}`);
+      const statsTxt = await statsRes.text();
+      let statsJson = {};
+      try { statsJson = JSON.parse(statsTxt); }
+      catch { throw new Error(`stats JSON parse error: ${statsTxt.slice(0,140)}`); }
+
       if (statsRes.ok) {
         if (statsJson.points || statsJson.stats) {
           setPoints(statsJson.points || {});
@@ -1163,6 +1177,8 @@ function PickScreenNBA({ goBack }) {
           setStats(statsJson || {});
           setPoints({});
         }
+      } else {
+        throw new Error(statsJson?.error || "Failed to load stats");
       }
     } catch (err) {
       console.log("NBA fetch error:", err);
@@ -1187,17 +1203,22 @@ function PickScreenNBA({ goBack }) {
     return !!(s.pts || s.reb || s.ast || s.stl || s.blk || s.tov || s.fg3m || s.min);
   };
 
-  // map positions from API (C/F/G) into 5 slots
+  // UPDATED: map positions generically (F/G) and specifically (PF/SF/PG/SG/C)
   const poolByPos = useMemo(() => {
     const map = { C:[], PF:[], SF:[], SG:[], PG:[] };
     for (const p of players) {
-      if (p.posNBA === "C") map.C.push(p);
-      if (p.posNBA === "F") { map.PF.push(p); map.SF.push(p); }
-      if (p.posNBA === "G") { map.SG.push(p); map.PG.push(p); }
+      const pos = String(p.posNBA || "").toUpperCase();
+      if (pos === "C") map.C.push(p);
+      else if (pos === "PF") map.PF.push(p);
+      else if (pos === "SF") map.SF.push(p);
+      else if (pos === "SG") map.SG.push(p);
+      else if (pos === "PG") map.PG.push(p);
+      else if (pos === "F") { map.PF.push(p); map.SF.push(p); }
+      else if (pos === "G") { map.SG.push(p); map.PG.push(p); }
     }
     for (const k of POS_NBA) {
       map[k].sort((a,b) => {
-        const db = pts(b.id) - pts(a.id);
+        const db = (Number(points[b.id] ?? 0) - Number(points[a.id] ?? 0));
         return db !== 0 ? db : a.name.localeCompare(b.name);
       });
     }
@@ -1255,6 +1276,11 @@ function PickScreenNBA({ goBack }) {
       (p.team||"").toLowerCase().includes(q)
     );
   }, [listForPos, query]);
+
+  // NEW: clear search when picker opens or slot changes
+  useEffect(() => {
+    if (pickerOpen) setQuery("");
+  }, [pickerOpen, pickerPos]);
 
   if (loading) {
     return (
