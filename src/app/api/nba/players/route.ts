@@ -1,68 +1,121 @@
-// Next.js (app router) – NBA players for a given date
-import type { NextRequest } from "next/server";
+// Next.js (app router) API route: /api/nba/players?date=YYYY-MM-DD (optional)
+// Builds a player pool for teams that play on the given date
+import { NextResponse } from "next/server";
 
-function yyyymmddFrom(req: NextRequest): string {
-  const url = new URL(req.url);
-  const q = url.searchParams.get("date"); // accepts YYYY-MM-DD or YYYYMMDD
-  const to8 = (s: string) => s.replaceAll("-", "").slice(0, 8);
-  if (q) return to8(q);
+const SCOREBOARD = "https://site.api.espn.com/apis/site/v2/sports/basketball/nba/scoreboard";
+// ^ NOTE: host is site.api.espn.com (NOT site.web.api.espn.com)
 
-  // default: today in America/New_York
-  const fmt = new Intl.DateTimeFormat("en-CA", { timeZone: "America/New_York", year: "numeric", month: "2-digit", day: "2-digit" });
-  const [y, m, d] = fmt.format(new Date()).split("-");
-  return `${y}${m}${d}`;
+function yyyymmdd(input?: string) {
+  // accept YYYY-MM-DD or already-compact YYYYMMDD; default = today ET
+  if (input && /^\d{8}$/.test(input)) return input;
+  if (input && /^\d{4}-\d{2}-\d{2}$/.test(input)) return input.replaceAll("-", "");
+  const now = new Date();
+  // You can improve this to convert to America/New_York if you want exact ET
+  const d = new Date(now.getFullYear(), now.getMonth(), now.getDate());
+  const mm = String(d.getMonth() + 1).padStart(2, "0");
+  const dd = String(d.getDate()).padStart(2, "0");
+  return `${d.getFullYear()}${mm}${dd}`;
 }
 
-export async function GET(req: NextRequest) {
+async function j<T>(url: string, init?: RequestInit): Promise<T> {
+  const r = await fetch(url, { ...init, next: { revalidate: 60 } });
+  if (!r.ok) throw new Error(`${url} ${r.status}`);
+  return r.json() as Promise<T>;
+}
+
+export async function GET(req: Request) {
   try {
-    const ymd = yyyymmddFrom(req);
+    const { searchParams } = new URL(req.url);
+    const dateParam = searchParams.get("date") || undefined;
+    const compact = yyyymmdd(dateParam);
 
-    // 1) Which teams play today?
-    const sbUrl = `https://site.api.espn.com/apis/site/v2/sports/basketball/nba/scoreboard?dates=${ymd}`;
-    const sb = await fetch(sbUrl, { cache: "no-store" });
-    if (!sb.ok) return Response.json({ error: `scoreboard ${sb.status}` }, { status: 502 });
-    const sbJson = await sb.json();
+    // 1) Get slate (events -> competitions -> teams)
+    const sb = await j<any>(`${SCOREBOARD}?dates=${compact}`);
+    const events: any[] = sb?.events ?? [];
 
-    const teamIds: Set<number> = new Set();
-    for (const ev of sbJson?.events ?? []) {
-      const comp = ev?.competitions?.[0];
-      for (const c of comp?.competitors ?? []) {
-        const id = Number(c?.team?.id);
-        if (Number.isFinite(id)) teamIds.add(id);
+    if (!events.length) {
+      return NextResponse.json({ players: [] }, { status: 200 });
+    }
+
+    // Grab unique team ids + map to abbreviations from the scoreboard
+    const teamIdToAbbr = new Map<string, string>();
+    const teamIds: Set<string> = new Set();
+
+    for (const ev of events) {
+      for (const comp of ev?.competitions ?? []) {
+        for (const c of comp?.competitors ?? []) {
+          const id = String(c?.team?.id ?? "");
+          if (!id) continue;
+          teamIds.add(id);
+          const abbr = c?.team?.abbreviation || c?.team?.shortDisplayName || "";
+          if (abbr) teamIdToAbbr.set(id, abbr);
+        }
       }
     }
-    // If no games, return empty list (off days)
-    if (!teamIds.size) return Response.json({ players: [] });
 
-    // 2) Pull rosters for each team
-    const players: Array<{ id: string; name: string; team: string; posNBA: "C" | "F" | "G" }> = [];
+    if (!teamIds.size) {
+      return NextResponse.json({ players: [] }, { status: 200 });
+    }
+
+    // 2) For each team, pull roster from the core API
+    // Example: https://sports.core.api.espn.com/v2/sports/basketball/leagues/nba/teams/{id}/athletes?limit=200
+    const rosterUrls = [...teamIds].map(
+      (id) => `https://sports.core.api.espn.com/v2/sports/basketball/leagues/nba/teams/${id}/athletes?limit=200`
+    );
+
+    const allPlayers: any[] = [];
     await Promise.all(
-      Array.from(teamIds).map(async (tid) => {
-        const rUrl = `https://site.api.espn.com/apis/site/v2/sports/basketball/nba/teams/${tid}/roster`;
-        const rRes = await fetch(rUrl, { cache: "no-store" });
-        if (!rRes.ok) return;
-        const rJson = await rRes.json();
-        const teamAbbr = rJson?.team?.abbreviation ?? rJson?.team?.shortDisplayName ?? "NBA";
-        for (const grp of rJson?.athletes ?? []) {
-          for (const a of grp?.items ?? []) {
-            const id = String(a?.id ?? "");
-            const name = a?.displayName ?? a?.fullName ?? "";
-            const pos = (a?.position?.abbreviation ?? "").toUpperCase();
-            if (!id || !name) continue;
-            // ESPN uses C / F / G; keep that and let UI map F→PF/SF, G→SG/PG
-            const posNBA = (pos === "C" || pos === "F" || pos === "G") ? pos : ("G" as const);
-            players.push({ id, name, team: teamAbbr, posNBA });
+      rosterUrls.map(async (url, idx) => {
+        try {
+          const rosterIndex = await j<any>(url);
+          const items: any[] = rosterIndex?.items ?? [];
+          const teamId = [...teamIds][idx];
+          const teamAbbr = teamIdToAbbr.get(teamId) ?? "NBA";
+
+          // Each item is a link to an athlete resource; fetch in small batches
+          // Keep it simple: fetch up to 20 per team to avoid hammering
+          const slice = items.slice(0, 20);
+          const athletes = await Promise.all(
+            slice.map(async (it) => {
+              try {
+                return await j<any>(it?.$ref || it?.href || "");
+              } catch {
+                return null;
+              }
+            })
+          );
+
+          for (const a of athletes) {
+            if (!a) continue;
+            const id = String(a.id);
+            const displayName = a?.displayName || a?.fullName || "";
+            const pos = a?.position?.abbreviation || a?.position?.name || ""; // C/F/G etc.
+            allPlayers.push({
+              id: `nba:${id}`,
+              name: displayName,
+              team: teamAbbr,
+              posNBA: pos === "Center" ? "C" : pos === "Forward" ? "F" : pos === "Guard" ? "G" : (pos || "G"),
+            });
           }
+        } catch {
+          // ignore a team failure; move on
         }
       })
     );
 
-    // de-dupe just in case
-    const seen = new Set<string>();
-    const unique = players.filter(p => (seen.has(p.id) ? false : (seen.add(p.id), true)));
+    // Deduplicate by id
+    const dedup = Object.values(
+      allPlayers.reduce((acc, p: any) => {
+        acc[p.id] = acc[p.id] || p;
+        return acc;
+      }, {} as Record<string, any>)
+    );
 
-    return Response.json({ players: unique });
+    // Sort by team/name for stable UI
+    dedup.sort((a: any, b: any) => (a.team || "").localeCompare(b.team || "") || a.name.localeCompare(b.name));
+
+    return NextResponse.json({ players: dedup }, { status: 200 });
   } catch (e: any) {
-    return Response.json({ error: String(e?.message || e) }, { status: 500 });
+    return NextResponse.json({ error: String(e?.message || e) }, { status: 500 });
   }
 }

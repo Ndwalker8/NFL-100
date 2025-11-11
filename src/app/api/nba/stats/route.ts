@@ -1,78 +1,118 @@
-// Next.js (app router) – NBA per-game stats + fantasy points for a given date
-import type { NextRequest } from "next/server";
+// Next.js (app router) API route: /api/nba/stats?date=YYYY-MM-DD (optional)
+// Produces { stats: { [playerId]: box }, points: { [playerId]: fp } }
+// using ESPN summary/boxscore per event on the date.
+import { NextResponse } from "next/server";
 
-function yyyymmddFrom(req: NextRequest): string {
-  const url = new URL(req.url);
-  const q = url.searchParams.get("date");
-  const to8 = (s: string) => s.replaceAll("-", "").slice(0, 8);
-  if (q) return to8(q);
+const SCOREBOARD = "https://site.api.espn.com/apis/site/v2/sports/basketball/nba/scoreboard";
+const SUMMARY = (eventId: string) =>
+  `https://site.api.espn.com/apis/site/v2/sports/basketball/nba/summary?event=${eventId}`;
 
-  const fmt = new Intl.DateTimeFormat("en-CA", { timeZone: "America/New_York", year: "numeric", month: "2-digit", day: "2-digit" });
-  const [y, m, d] = fmt.format(new Date()).split("-");
-  return `${y}${m}${d}`;
+function yyyymmdd(input?: string) {
+  if (input && /^\d{8}$/.test(input)) return input;
+  if (input && /^\d{4}-\d{2}-\d{2}$/.test(input)) return input.replaceAll("-", "");
+  const now = new Date();
+  const d = new Date(now.getFullYear(), now.getMonth(), now.getDate());
+  const mm = String(d.getMonth() + 1).padStart(2, "0");
+  const dd = String(d.getDate()).padStart(2, "0");
+  return `${d.getFullYear()}${mm}${dd}`;
 }
 
-// simple fantasy formula (tweak as you like)
-function fp(s: any) {
-  const pts = Number(s?.points ?? s?.statistics?.points ?? s?.pts ?? 0);
-  const reb = Number(s?.rebounds ?? s?.reb ?? 0);
-  const ast = Number(s?.assists ?? s?.ast ?? 0);
-  const stl = Number(s?.steals ?? s?.stl ?? 0);
-  const blk = Number(s?.blocks ?? s?.blk ?? 0);
-  const tov = Number(s?.turnovers ?? s?.tov ?? 0);
-  const fg3 = Number(s?.threePointersMade ?? s?.fg3m ?? 0);
-  return pts + 1.2*reb + 1.5*ast + 3*stl + 3*blk - 1*tov + 0.5*fg3;
+async function j<T>(url: string, init?: RequestInit): Promise<T> {
+  const r = await fetch(url, { ...init, next: { revalidate: 30 } });
+  if (!r.ok) throw new Error(`${url} ${r.status}`);
+  return r.json() as Promise<T>;
 }
 
-export async function GET(req: NextRequest) {
+// Very simple fantasy formula (tweak as you like)
+// Pts + 1.2*Reb + 1.5*Ast + 3*Stl + 3*Blk - 1*TOV + 0.5*3PM
+function fpts(s: any) {
+  const n = (x: any) => (typeof x === "number" ? x : Number(x || 0));
+  return (
+    n(s.points) +
+    1.2 * n(s.totReb ?? s.rebounds) +
+    1.5 * n(s.assists) +
+    3 * n(s.steals) +
+    3 * n(s.blocks) -
+    1 * n(s.turnovers) +
+    0.5 * n(s.threePointFieldGoalsMade ?? s.threePointersMade ?? s.fg3m)
+  );
+}
+
+export async function GET(req: Request) {
   try {
-    const ymd = yyyymmddFrom(req);
+    const { searchParams } = new URL(req.url);
+    const dateParam = searchParams.get("date") || undefined;
+    const compact = yyyymmdd(dateParam);
 
-    // 1) Get events for the day
-    const sbUrl = `https://site.api.espn.com/apis/site/v2/sports/basketball/nba/scoreboard?dates=${ymd}`;
-    const sb = await fetch(sbUrl, { cache: "no-store" });
-    if (!sb.ok) return Response.json({ error: `scoreboard ${sb.status}` }, { status: 502 });
-    const sbJson = await sb.json();
-    const eventIds: string[] = (sbJson?.events ?? []).map((e: any) => String(e?.id)).filter(Boolean);
+    const sb = await j<any>(`${SCOREBOARD}?dates=${compact}`);
+    const events: any[] = sb?.events ?? [];
+    if (!events.length) {
+      return NextResponse.json({ stats: {}, points: {} }, { status: 200 });
+    }
 
     const stats: Record<string, any> = {};
     const points: Record<string, number> = {};
 
-    // 2) For each game, read the summary (box score has per-player lines)
+    // Pull each event's summary and walk the boxscore players
     await Promise.all(
-      eventIds.map(async (eid) => {
-        const sumUrl = `https://site.api.espn.com/apis/site/v2/sports/basketball/nba/summary?event=${eid}`;
-        const res = await fetch(sumUrl, { cache: "no-store" });
-        if (!res.ok) return;
-        const j = await res.json();
-        const box = j?.boxscore?.players ?? [];
-        for (const side of box) {
-          for (const pl of side?.statistics ?? []) {
-            const a = pl?.athlete;
-            const pid = String(a?.id ?? "");
-            if (!pid) continue;
+      events.map(async (ev) => {
+        try {
+          const evId = String(ev?.id ?? ev?.uid ?? "");
+          if (!evId) return;
+          const sum = await j<any>(SUMMARY(evId));
 
-            // ESPN mixes totals in 'stats' and/or normalized fields; keep the common ones
-            const line = {
-              pts: Number(pl?.statistics?.find?.((x:any)=>x.name==="points")?.value ?? pl?.points ?? 0),
-              reb: Number(pl?.statistics?.find?.((x:any)=>x.name==="rebounds")?.value ?? pl?.rebounds ?? 0),
-              ast: Number(pl?.statistics?.find?.((x:any)=>x.name==="assists")?.value ?? pl?.assists ?? 0),
-              stl: Number(pl?.statistics?.find?.((x:any)=>x.name==="steals")?.value ?? pl?.steals ?? 0),
-              blk: Number(pl?.statistics?.find?.((x:any)=>x.name==="blocks")?.value ?? pl?.blocks ?? 0),
-              tov: Number(pl?.statistics?.find?.((x:any)=>x.name==="turnovers")?.value ?? pl?.turnovers ?? 0),
-              fg3m: Number(pl?.statistics?.find?.((x:any)=>x.name==="threePointersMade")?.value ?? pl?.threePointersMade ?? 0),
-              min: pl?.minutes ?? null,
-            };
+          // Boxscore shape varies; ESPN exposes "boxscore" -> "players" grouped by team
+          const box = sum?.boxscore?.players ?? [];
+          for (const teamBlock of box) {
+            for (const at of teamBlock?.statistics ?? []) {
+              // Some variants use teamBlock.athletes
+            }
+            for (const athlete of teamBlock?.athletes ?? []) {
+              const a = athlete?.athlete;
+              if (!a?.id) continue;
+              const id = `nba:${a.id}`;
 
-            stats[pid] = line;
-            points[pid] = fp(line);
+              // Merge stat lines across sections, normalizing keys
+              const line: any = {
+                pts: 0, reb: 0, ast: 0, stl: 0, blk: 0, tov: 0, fg3m: 0, min: 0,
+              };
+
+              // ESPN presents stats as arrays of {name, value}
+              for (const sect of athlete?.stats ?? []) {
+                for (const s of sect?.stats ?? []) {
+                  const name = (s?.name || "").toLowerCase();
+                  const val = Number(s?.value ?? 0);
+                  if (name === "points" || name === "pts") line.pts = val;
+                  if (name === "totreb" || name === "rebounds" || name === "reb") line.reb = val;
+                  if (name === "assists" || name === "ast") line.ast = val;
+                  if (name === "steals" || name === "stl") line.stl = val;
+                  if (name === "blocks" || name === "blk") line.blk = val;
+                  if (name === "turnovers" || name === "to" || name === "tov") line.tov = val;
+                  if (name === "threepointersmade" || name === "3ptm" || name === "fg3m") line.fg3m = val;
+                  if (name === "minutes" || name === "min") line.min = val;
+                }
+              }
+
+              stats[id] = line;
+              points[id] = fpts({
+                points: line.pts,
+                totReb: line.reb,
+                assists: line.ast,
+                steals: line.stl,
+                blocks: line.blk,
+                turnovers: line.tov,
+                threePointFieldGoalsMade: line.fg3m,
+              });
+            }
           }
+        } catch {
+          // ignore event failures; continue
         }
       })
     );
 
-    return Response.json({ stats, points });
+    return NextResponse.json({ stats, points }, { status: 200 });
   } catch (e: any) {
-    return Response.json({ error: String(e?.message || e) }, { status: 500 });
+    return NextResponse.json({ error: String(e?.message || e) }, { status: 500 });
   }
 }
