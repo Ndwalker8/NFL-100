@@ -1141,43 +1141,42 @@ function PickScreenNBA({ goBack }) {
   const [pickerOpen, setPickerOpen] = useState(false);
   const [pickerPos, setPickerPos] = useState("C");
 
-  // load players
-  useEffect(() => {
-    let on = true;
-    (async () => {
-      try {
-        setLoading(true); setError(null);
-        const r = await fetch(`${BASE_URL}/api/nba/players`);
-        const txt = await r.text();
-        let j = null;
-        try { j = JSON.parse(txt); } catch { throw new Error(`Unexpected response (${r.status}). ${txt.slice(0,140)}`); }
-        if (!r.ok) throw new Error(j?.error || `players ${r.status}`);
-        if (!on) return;
-        setPlayers(j.players || []);
-      } catch (e) {
-        setError(String(e?.message || e));
-      } finally { if (on) setLoading(false); }
-    })();
-    return () => { on = false; };
-  }, []);
+  // Combined loader for players + stats for the selected date
+  const getData = async () => {
+    try {
+      const today = date || new Date().toISOString().slice(0, 10);
 
-  // load stats by date
+      // Load players for the date (backend may filter by availability)
+      const playersRes = await fetch(`${BASE_URL}/api/nba/players?date=${encodeURIComponent(today)}`);
+      const playersJson = await playersRes.json();
+      if (playersRes.ok) setPlayers(playersJson.players || []);
+
+      // Load stats for the date
+      const statsRes = await fetch(`${BASE_URL}/api/nba/stats?date=${encodeURIComponent(today)}`);
+      const statsJson = await statsRes.json();
+      if (statsRes.ok) {
+        if (statsJson.points || statsJson.stats) {
+          setPoints(statsJson.points || {});
+          setStats(statsJson.stats || {});
+        } else {
+          // fallback: assume top-level map is stats
+          setStats(statsJson || {});
+          setPoints({});
+        }
+      }
+    } catch (err) {
+      console.log("NBA fetch error:", err);
+      setError(String(err?.message || err));
+    }
+  };
+
   useEffect(() => {
     let on = true;
     (async () => {
-      try {
-        setLoading(true); setError(null);
-        const r = await fetch(`${BASE_URL}/api/nba/stats?date=${encodeURIComponent(date)}`);
-        const txt = await r.text();
-        let j = null;
-        try { j = JSON.parse(txt); } catch { throw new Error(`Unexpected response (${r.status}). ${txt.slice(0,140)}`); }
-        if (!r.ok) throw new Error(j?.error || `stats ${r.status}`);
-        if (!on) return;
-        setPoints(j.points || {});
-        setStats(j.stats || {});
-      } catch (e) {
-        setError(String(e?.message || e));
-      } finally { if (on) setLoading(false); }
+      if (!on) return;
+      setLoading(true); setError(null);
+      await getData();
+      if (on) setLoading(false);
     })();
     return () => { on = false; };
   }, [date]);
