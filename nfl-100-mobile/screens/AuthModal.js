@@ -1,5 +1,8 @@
 import React, { useState } from 'react';
-import { View, Text, TextInput, TouchableOpacity, StyleSheet } from 'react-native';
+import {
+  View, Text, TextInput, TouchableOpacity, StyleSheet,
+  KeyboardAvoidingView, Platform, ScrollView, TouchableWithoutFeedback, Keyboard
+} from 'react-native';
 import { supabase } from '../lib/supabase';
 
 export default function AuthModal({ onClose }) {
@@ -31,63 +34,77 @@ export default function AuthModal({ onClose }) {
   };
 
   return (
-    <View style={S.container}>
-      <Text style={S.title}>
-        {mode === 'signUp' ? 'Create Account' : 'Sign In'}
-      </Text>
-
-      {mode === 'signUp' && (
-        <TextInput
-          style={S.input}
-          placeholder="Username"
-          autoCapitalize="none"
-          value={username}
-          onChangeText={setUsername}
-        />
-      )}
-      <TextInput
-        style={S.input}
-        placeholder="Email"
-        autoCapitalize="none"
-        keyboardType="email-address"
-        value={email}
-        onChangeText={setEmail}
-      />
-      <TextInput
-        style={S.input}
-        placeholder="Password"
-        secureTextEntry
-        value={password}
-        onChangeText={setPassword}
-      />
-
-      <TouchableOpacity
-        onPress={mode === 'signUp' ? signUp : signIn}
-        style={S.primaryButton}
+    <TouchableWithoutFeedback onPress={Keyboard.dismiss}>
+      <KeyboardAvoidingView
+        behavior={Platform.OS === 'ios' ? 'padding' : 'height'}
+        keyboardVerticalOffset={12}
+        style={{ width: '100%' }}
       >
-        <Text style={S.primaryText}>
-          {mode === 'signUp' ? 'Sign Up' : 'Sign In'}
-        </Text>
-      </TouchableOpacity>
+        <ScrollView
+          keyboardShouldPersistTaps="handled"
+          contentContainerStyle={{ flexGrow: 0 }}
+          bounces={false}
+        >
+          <View style={S.container}>
+            <Text style={S.title}>
+              {mode === 'signUp' ? 'Create Account' : 'Sign In'}
+            </Text>
 
-      <TouchableOpacity
-        onPress={() => setMode(mode === 'signUp' ? 'signIn' : 'signUp')}
-      >
-        <Text style={S.linkText}>
-          {mode === 'signUp'
-            ? 'Already have an account? Sign in'
-            : 'New here? Create an account'}
-        </Text>
-      </TouchableOpacity>
+            {mode === 'signUp' && (
+              <TextInput
+                style={S.input}
+                placeholder="Username"
+                autoCapitalize="none"
+                value={username}
+                onChangeText={setUsername}
+              />
+            )}
+            <TextInput
+              style={S.input}
+              placeholder="Email"
+              autoCapitalize="none"
+              keyboardType="email-address"
+              value={email}
+              onChangeText={setEmail}
+            />
+            <TextInput
+              style={S.input}
+              placeholder="Password"
+              secureTextEntry
+              value={password}
+              onChangeText={setPassword}
+            />
 
-      <TouchableOpacity onPress={signOut} style={S.mutedButton}>
-        <Text>Sign Out</Text>
-      </TouchableOpacity>
+            <TouchableOpacity
+              onPress={mode === 'signUp' ? signUp : signIn}
+              style={S.primaryButton}
+            >
+              <Text style={S.primaryText}>
+                {mode === 'signUp' ? 'Sign Up' : 'Sign In'}
+              </Text>
+            </TouchableOpacity>
 
-      <TouchableOpacity onPress={onClose}>
-        <Text style={S.linkText}>Close</Text>
-      </TouchableOpacity>
-    </View>
+            <TouchableOpacity
+              onPress={() => setMode(mode === 'signUp' ? 'signIn' : 'signUp')}
+            >
+              <Text style={S.linkText}>
+                {mode === 'signUp'
+                  ? 'Already have an account? Sign in'
+                  : 'New here? Create an account'}
+              </Text>
+            </TouchableOpacity>
+
+            <TouchableOpacity onPress={signOut} style={S.mutedButton}>
+              <Text>Sign Out</Text>
+            </TouchableOpacity>
+
+            <TouchableOpacity onPress={onClose}>
+              <Text style={S.linkText}>Close</Text>
+            </TouchableOpacity>
+          </View>
+        </ScrollView>
+      </KeyboardAvoidingView>
+    </TouchableWithoutFeedback>
   );
 }
 

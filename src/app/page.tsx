@@ -6,6 +6,7 @@ import { Card, CardContent, CardHeader, CardTitle } from "@/components/ui/card";
 import { Select, SelectTrigger, SelectContent, SelectItem, SelectValue } from "@/components/ui/select";
 import { Slider } from "@/components/ui/slider";
 import { Button } from "@/components/ui/button";
+import { Input } from "@/components/ui/input";
 
 type Mode = "std" | "half" | "ppr";
 type Player = { id: string; name: string; pos: "QB" | "RB" | "WR" | "TE"; team: string | null; active: boolean; };
@@ -236,20 +237,38 @@ function PlayerSlot({
   label, pick, setPick, candidates,
 }: { label: Player["pos"]; pick: string | null; setPick: (v: string | null) => void; candidates: Player[]; }) {
 
+  const [query, setQuery] = useState("");
+  function normalize(s: string) {
+    return s.normalize("NFD").replace(/\p{Diacritic}/gu, "").toLowerCase();
+  }
+
   const options = useMemo(() => {
     const filtered = candidates.filter((p) => {
       if (!p.id) return false;
-      if (pick && p.id === pick) return true;    // allow the current pick to stay selectable
+      if (pick && p.id === pick) return true; // keep current pick selectable
       return !selectedIds.has(p.id);
     });
-    filtered.sort((a, b) => {
+
+    // apply name/team search
+    const q = normalize(query);
+    const filteredBySearch = q
+      ? filtered.filter((p) => {
+          const n = normalize(p.name);
+          const t = p.team ? normalize(p.team) : "";
+          return n.includes(q) || t.includes(q);
+        })
+      : filtered;
+
+    // sort by this week's points desc, then name
+    filteredBySearch.sort((a, b) => {
       const da = ptsFor(a.id);
       const db = ptsFor(b.id);
       if (db !== da) return db - da;
       return a.name.localeCompare(b.name);
     });
-    return filtered;
-  }, [candidates, pick, selectedIds, points]);
+
+    return filteredBySearch;
+  }, [candidates, pick, selectedIds, points, query]);
 
   const livePts = pick ? ptsFor(pick).toFixed(2) : "0.00";
   const s = statsFor(pick);
@@ -264,6 +283,13 @@ function PlayerSlot({
       </CardHeader>
 
       <CardContent className="space-y-3">
+        {/* Search input */}
+        <Input
+          value={query}
+          onChange={(e: React.ChangeEvent<HTMLInputElement>) => setQuery(e.target.value)}
+          placeholder={`Search ${label} by name or team...`}
+          className="mb-2"
+        />
         {/* Picker row */}
         <div className="flex items-center gap-3">
           <Select value={pick ?? ""} onValueChange={(v) => setPick(v || null)} disabled={loadingPlayers}>

@@ -1,3 +1,4 @@
+// App.js
 import React, { useEffect, useMemo, useState } from "react";
 import {
   ActivityIndicator,
@@ -11,9 +12,14 @@ import {
   Image,
   TextInput,
   Alert,
+  KeyboardAvoidingView,
+  TouchableWithoutFeedback,
+  Keyboard,
+  ScrollView,
 } from "react-native";
 import Constants from "expo-constants";
-import { SafeAreaView } from "react-native-safe-area-context";
+import { StatusBar } from "expo-status-bar";
+import { SafeAreaProvider, SafeAreaView, initialWindowMetrics, useSafeAreaInsets } from "react-native-safe-area-context";
 import { LinearGradient } from "expo-linear-gradient";
 import { AuthProvider, useAuth } from "./auth/AuthProvider";
 import AuthModal from "./screens/AuthModal";
@@ -30,24 +36,59 @@ const BASE_URL =
   }));
 const MODE = "ppr";
 const POS_ORDER = ["QB", "RB", "WR", "TE"];
+const REG_WEEKS = 18;
+
+/** ---- Reusable gradient header that reaches under the notch ---- */
+function GradientHeader({ children }) {
+  const insets = useSafeAreaInsets();
+  return (
+    <LinearGradient
+      colors={["#7c3aed", "#06b6d4"]}
+      start={{ x: 0, y: 0 }}
+      end={{ x: 1, y: 1 }}
+      style={[
+        S.headerFull,
+        {
+          marginTop: -insets.top,
+          paddingTop: insets.top + 40,
+          paddingBottom: 24,
+        },
+      ]}
+    >
+      <StatusBar style="light" translucent backgroundColor="transparent" />
+      {children}
+    </LinearGradient>
+  );
+}
 
 /** ---- Root ---- */
 export default function App() {
   return (
-    <AuthProvider>
-      <Navigator />
-    </AuthProvider>
+    <SafeAreaProvider initialMetrics={initialWindowMetrics}>
+      <StatusBar style="light" translucent />
+      <AuthProvider>
+        <Navigator />
+      </AuthProvider>
+    </SafeAreaProvider>
   );
 }
 
 function Navigator() {
-  const [screen, setScreen] = useState("home"); // 'home' | 'picks' | 'profile'
-  if (screen === "picks")   return <PickScreen goBack={() => setScreen("home")} />;
-  if (screen === "profile") return <ProfileScreen goBack={() => setScreen("home")} />;
-  return <HomeScreen goToPicks={() => setScreen("picks")} goToProfile={() => setScreen("profile")} />;
+  const [screen, setScreen] = useState("home"); // 'home' | 'picks' | 'picksNBA' | 'profile'
+
+  // NFL draft persisted while navigating
+  const [draft, setDraft] = useState({ QB: null, RB: null, WR: null, TE: null });
+
+  if (screen === "picks")
+    return <PickScreen draft={draft} setDraft={setDraft} goBack={() => setScreen("home")} />;
+  if (screen === "picksNBA")
+    return <PickScreenNBA goBack={() => setScreen("home")} />;
+  if (screen === "profile")
+    return <ProfileScreen goBack={() => setScreen("home")} />;
+  return <HomeScreen goToPicksNFL={() => setScreen("picks")} goToPicksNBA={() => setScreen("picksNBA")} goToProfile={() => setScreen("profile")} />;
 }
 
-/** ---- Shared: fetch current {season, week} ---- */
+/** ---- Shared: fetch current {season, week} (NFL) ---- */
 function useLatestMeta() {
   const [meta, setMeta] = useState({ season: null, week: null });
   const [loading, setLoading] = useState(true);
@@ -60,7 +101,9 @@ function useLatestMeta() {
         setLoading(true);
         setErr(null);
         const r = await fetch(`${BASE_URL}/api/meta`);
-        const j = await r.json();
+        const txt = await r.text();
+        let j = null;
+        try { j = JSON.parse(txt); } catch (e) { throw new Error(`JSON parse error: ${txt.slice(0,140)}`); }
         if (!r.ok) throw new Error(j?.error || "meta fetch failed");
         if (on) setMeta({ season: j.season, week: j.week });
       } catch (e) {
@@ -84,10 +127,19 @@ function displayNameFrom(user, profile) {
     "User"
   );
 }
-function defaultAvatarUrl(name = "User") {
-  const seed = encodeURIComponent(name);
-  return `https://api.dicebear.com/7.x/thumbs/png?seed=${seed}`;
+
+// DiceBear "thumbs" URL builder with seed + colors
+function buildThumbUrl({ seed = "User", bg = "#e2e8f0", body = "#111827" } = {}) {
+  const bgHex = (bg || "#e2e8f0").replace("#", "");
+  const bodyHex = (body || "#111827").replace("#", "");
+  const seedEnc = encodeURIComponent(seed);
+  return `https://api.dicebear.com/7.x/thumbs/png?seed=${seedEnc}&backgroundColor=${bgHex}&shapeColor=${bodyHex}&radius=50`;
 }
+
+function defaultAvatarUrl(name = "User") {
+  return buildThumbUrl({ seed: name, bg: "#0ea5e9", body: "#ffffff" });
+}
+
 async function ensureProfile(user) {
   if (!user) return null;
   const { data: prof, error } = await supabase
@@ -105,6 +157,7 @@ async function ensureProfile(user) {
     .maybeSingle();
   return created ?? null;
 }
+
 function hasStarted(s) {
   if (!s) return false;
   for (const k of ["passYds","passTD","passINT","rushYds","rushTD","rec","recYds","recTD"]) {
@@ -113,8 +166,14 @@ function hasStarted(s) {
   return false;
 }
 
+// previous week helper (NFL)
+function previousWeekOf(season, week) {
+  if (week > 1) return { season, week: week - 1 };
+  return { season: season - 1, week: REG_WEEKS };
+}
+
 /** ===================== HOME ===================== */
-function HomeScreen({ goToPicks, goToProfile }) {
+function HomeScreen({ goToPicksNFL, goToPicksNBA, goToProfile }) {
   const { user } = useAuth();
   const [authOpen, setAuthOpen] = useState(false);
   const [username, setUsername] = useState(null);
@@ -126,8 +185,9 @@ function HomeScreen({ goToPicks, goToProfile }) {
     (async () => {
       if (!user) return;
       const prof = await ensureProfile(user);
-      setUsername(displayNameFrom(user, prof));
-      setAvatar(prof?.avatar_url ?? defaultAvatarUrl(displayNameFrom(user, prof)));
+      const disp = displayNameFrom(user, prof);
+      setUsername(disp);
+      setAvatar(prof?.avatar_url ?? defaultAvatarUrl(disp));
       if (authOpen) setAuthOpen(false);
     })();
   }, [user]);
@@ -150,10 +210,10 @@ function HomeScreen({ goToPicks, goToProfile }) {
   const onPressProfile = () => { user ? goToProfile() : setAuthOpen(true); };
 
   return (
-    <SafeAreaView style={S.container}>
-      <LinearGradient colors={["#7c3aed","#06b6d4"]} start={{x:0,y:0}} end={{x:1,y:1}} style={S.headerFull}>
+    <SafeAreaView style={S.container} edges={['left','right','bottom']}>
+      <GradientHeader>
         <View style={{ flex: 1, gap: 6 }}>
-          <Text style={S.appTitle}>Gridiron Hundred</Text>
+          <Text style={S.appTitle}>Fantasy Hundred</Text>
           <Text style={S.appSub}>
             {metaLoading || !SEASON || !WEEK ? "Loading week…" : `Season ${SEASON} · Week ${WEEK} · ${MODE.toUpperCase()}`}
           </Text>
@@ -179,16 +239,25 @@ function HomeScreen({ goToPicks, goToProfile }) {
             <Text style={S.smallBtnTxt}>{user ? "Profile" : "Sign In"}</Text>
           </TouchableOpacity>
         </View>
-      </LinearGradient>
+      </GradientHeader>
 
       <View style={{ gap: 12 }}>
-        <TouchableOpacity activeOpacity={0.9} onPress={goToPicks} disabled={metaLoading || !SEASON || !WEEK}>
+        <TouchableOpacity activeOpacity={0.9} onPress={goToPicksNFL} >
           <LinearGradient colors={["#0ea5e9","#22c55e"]} start={{x:0,y:0}} end={{x:1,y:1}} style={S.bigTile}>
             <Text style={S.bigTileTxt}>NFL</Text>
             <Text style={S.bigTileSub}>{metaLoading ? "Loading…" : "Play the 100-point challenge"}</Text>
           </LinearGradient>
         </TouchableOpacity>
-        <TileDisabled label="NBA" />
+
+        {/* NBA enabled */}
+        <TouchableOpacity activeOpacity={0.9} onPress={goToPicksNBA}>
+          <LinearGradient colors={["#7c3aed","#06b6d4"]} start={{x:0,y:0}} end={{x:1,y:1}} style={S.bigTile}>
+            <Text style={S.bigTileTxt}>NBA</Text>
+            <Text style={S.bigTileSub}>Pick C • PF • SF • SG • PG</Text>
+          </LinearGradient>
+        </TouchableOpacity>
+
+        {/* Keep NHL disabled for now */}
         <TileDisabled label="NHL" />
       </View>
 
@@ -209,7 +278,7 @@ function TileDisabled({ label }) {
   );
 }
 
-/** ===================== PROFILE ===================== */
+/** ===================== PROFILE (unchanged) ===================== */
 function ProfileScreen({ goBack }) {
   const { user } = useAuth();
   const { season: SEASON, week: WEEK, loading: metaLoading } = useLatestMeta();
@@ -226,6 +295,13 @@ function ProfileScreen({ goBack }) {
   const [friends, setFriends] = useState([]); // [{id, username, avatar_url, wins}]
   const [friendsErr, setFriendsErr] = useState(null);
   const [addOpen, setAddOpen] = useState(false);
+
+  // Friend lineup modal
+  const [friendLineupOpen, setFriendLineupOpen] = useState(false);
+  const [friendFocus, setFriendFocus] = useState(null); // {id, username, avatar_url}
+
+  // Avatar customizer modal
+  const [avatarOpen, setAvatarOpen] = useState(false);
 
   useEffect(() => {
     let on = true;
@@ -276,7 +352,6 @@ function ProfileScreen({ goBack }) {
       try {
         if (!user || !SEASON || !WEEK) { setFriends([]); return; }
 
-        // 1) mutual friend IDs via RPC
         const { data: mutuals, error: rpcErr } = await supabase.rpc("mutual_friends", { this_user: user.id });
         if (rpcErr && (rpcErr.code === "42883" || /mutual_friends/i.test(rpcErr.message || ""))) {
           if (on) setFriends([]); // RPC missing yet
@@ -287,14 +362,12 @@ function ProfileScreen({ goBack }) {
         const friendIds = (mutuals ?? []).map(r => r.friend_id);
         if (!friendIds.length) { if (on) setFriends([]); return; }
 
-        // 2) profiles
         const { data: profs, error: profErr } = await supabase
           .from("profiles")
           .select("id, username, avatar_url")
           .in("id", friendIds);
         if (profErr) throw profErr;
 
-        // 3) prior-week wins
         const { data: winRows, error: winsErr } = await supabase
           .from("lineups")
           .select("user_id, total_points")
@@ -324,38 +397,9 @@ function ProfileScreen({ goBack }) {
     return () => { on = false; };
   }, [user, SEASON, WEEK]);
 
-  // Add friend handler
-  const addFriendByUsername = async (usernameInput) => {
-    const handle = (usernameInput || "").trim().replace(/^@/, "");
-    if (!handle) return { ok: false, msg: "Enter a username" };
-    if (!user) return { ok: false, msg: "Please sign in" };
-
-    // find user by username (case-insensitive)
-    const { data: target, error: findErr } = await supabase
-      .from("profiles")
-      .select("id, username")
-      .ilike("username", handle)
-      .maybeSingle();
-    if (findErr) return { ok: false, msg: findErr.message };
-    if (!target) return { ok: false, msg: "User not found" };
-    if (target.id === user.id) return { ok: false, msg: "You can’t follow yourself" };
-
-    // insert follow edge (ignore if already exists)
-    const { error: insErr } = await supabase
-      .from("follows")
-      .insert({ follower: user.id, following: target.id })
-      .select("follower, following")
-      .maybeSingle();
-
-    if (insErr?.code === "23505") return { ok: true, msg: `Already following @${target.username}` }; // PK conflict
-    if (insErr) return { ok: false, msg: insErr.message };
-
-    return { ok: true, msg: `Now following @${target.username}. When they follow back you’ll be friends.` };
-  };
-
   if (!user) {
     return (
-      <SafeAreaView style={S.center}>
+      <SafeAreaView style={S.center} edges={['left','right','bottom']}>
         <Text style={S.title}>Please sign in</Text>
         <Text style={S.muted}>Go back and tap “Sign In”.</Text>
       </SafeAreaView>
@@ -363,7 +407,7 @@ function ProfileScreen({ goBack }) {
   }
   if (loading || metaLoading) {
     return (
-      <SafeAreaView style={S.center}>
+      <SafeAreaView style={S.center} edges={['left','right','bottom']}>
         <ActivityIndicator size="large" />
         <Text style={S.muted}>Loading profile…</Text>
       </SafeAreaView>
@@ -373,8 +417,8 @@ function ProfileScreen({ goBack }) {
   const losses = Math.max(0, attempts - wins);
 
   return (
-    <SafeAreaView style={S.container}>
-      <LinearGradient colors={["#7c3aed","#06b6d4"]} start={{x:0,y:0}} end={{x:1,y:1}} style={S.headerFull}>
+    <SafeAreaView style={S.container} edges={['left','right','bottom']}>
+      <GradientHeader>
         <TouchableOpacity onPress={goBack} style={S.smallBtn}><Text style={S.smallBtnTxt}>← Home</Text></TouchableOpacity>
         <View style={{ flexDirection: "row", alignItems: "center", gap: 12 }}>
           <Image source={{ uri: avatar }} style={{ width: 44, height: 44, borderRadius: 22, borderWidth: 1, borderColor: "rgba(255,255,255,0.5)" }} />
@@ -384,7 +428,13 @@ function ProfileScreen({ goBack }) {
           </View>
         </View>
         <View style={{ width: 64 }} />
-      </LinearGradient>
+      </GradientHeader>
+
+      <View style={{ flexDirection: "row", gap: 10, marginTop: 6 }}>
+        <TouchableOpacity onPress={() => setAvatarOpen(true)} style={[S.smallBtn,{ backgroundColor:"rgba(255,255,255,0.9)"}]}>
+          <Text style={[S.smallBtnTxt,{ color:"#0f172a"}]}>Edit Avatar</Text>
+        </TouchableOpacity>
+      </View>
 
       <View style={S.profileGrid}>
         <StatCard title="Wins (100/100)" value={String(wins)} />
@@ -393,26 +443,106 @@ function ProfileScreen({ goBack }) {
         <StatCard title="Best Week" value={best ? `${best.total_points.toFixed(2)} pts (S${best.season} W${best.week})` : "—"} />
       </View>
 
-      {/* Friends section */}
       <FriendsList
         loading={friendsLoading}
         error={friendsErr}
         friends={friends}
         onAdd={() => setAddOpen(true)}
+        onOpenFriend={(f) => { setFriendFocus(f); setFriendLineupOpen(true); }}
       />
 
-      {/* Add Friend Modal */}
       <AddFriendModal
         visible={addOpen}
         onClose={() => setAddOpen(false)}
         onSubmit={async (handle) => {
-          const res = await addFriendByUsername(handle);
+          const res = await addFriendByUsername(handle, user);
           Alert.alert(res.ok ? "Success" : "Hmm", res.msg);
           if (res.ok) setAddOpen(false);
         }}
       />
+
+      <FriendLineupModal
+        visible={friendLineupOpen}
+        onClose={() => setFriendLineupOpen(false)}
+        friend={friendFocus}
+        season={SEASON}
+        week={WEEK}
+      />
+
+      <AvatarCustomizerModal
+        visible={avatarOpen}
+        onClose={() => setAvatarOpen(false)}
+        currentUrl={avatar}
+        onSaved={(newUrl) => setAvatar(newUrl)}
+        user={user}
+      />
     </SafeAreaView>
   );
+}
+
+function AddFriendModal({ visible, onClose, onSubmit }) {
+  const [handle, setHandle] = useState("");
+
+  return (
+    <Modal visible={visible} animationType="slide" onRequestClose={onClose} transparent>
+      <View style={{ flex: 1, backgroundColor: "rgba(0,0,0,0.25)", justifyContent: "flex-end" }}>
+        <KeyboardAvoidingView
+          behavior={Platform.OS === "ios" ? "padding" : "height"}
+          keyboardVerticalOffset={12}
+          style={{ width: "100%" }}
+        >
+          <View style={S.addModal}>
+            <Text style={S.addTitle}>Add Friend</Text>
+            <Text style={S.muted}>Enter their @username</Text>
+
+            <TextInput
+              value={handle}
+              onChangeText={setHandle}
+              placeholder="@username"
+              autoCapitalize="none"
+              autoCorrect={false}
+              style={S.input}
+            />
+
+            <View style={{ flexDirection: "row", gap: 10, marginTop: 8 }}>
+              <TouchableOpacity onPress={onClose} style={[S.smallBtn, { backgroundColor: "#e5e7eb" }]}>
+                <Text style={[S.smallBtnTxt, { color: "#111827" }]}>Cancel</Text>
+              </TouchableOpacity>
+              <TouchableOpacity onPress={() => onSubmit(handle)} style={S.primaryBtn}>
+                <Text style={S.primaryBtnTxt}>Follow</Text>
+              </TouchableOpacity>
+            </View>
+          </View>
+        </KeyboardAvoidingView>
+      </View>
+    </Modal>
+  );
+}
+
+async function addFriendByUsername(usernameInput, user) {
+  const handle = (usernameInput || "").trim().replace(/^@/, "");
+  if (!handle) return { ok: false, msg: "Enter a username" };
+  if (!user) return { ok: false, msg: "Please sign in" };
+
+  const { data: target, error: findErr } = await supabase
+    .from("profiles")
+    .select("id, username")
+    .ilike("username", handle)
+    .maybeSingle();
+  if (findErr) return { ok: false, msg: findErr.message };
+  if (!target) return { ok: false, msg: "User not found" };
+  if (target.id === user.id) return { ok: false, msg: "You can’t follow yourself" };
+
+  const { error: insErr } = await supabase
+    .from("follows")
+    .insert({ follower: user.id, following: target.id })
+    .select("follower, following")
+    .maybeSingle();
+
+  if (insErr?.code === "23505") return { ok: true, msg: `Already following @${target.username}` };
+  if (insErr) return { ok: false, msg: insErr.message };
+
+  return { ok: true, msg: `Now following @${target.username}. When they follow back you’ll be friends.` };
 }
 
 function StatCard({ title, value }) {
@@ -424,7 +554,7 @@ function StatCard({ title, value }) {
   );
 }
 
-function FriendsList({ loading, error, friends, onAdd }) {
+function FriendsList({ loading, error, friends, onAdd, onOpenFriend }) {
   return (
     <View style={S.friendsBlock}>
       <View style={{ flexDirection: "row", justifyContent: "space-between", alignItems: "center" }}>
@@ -446,7 +576,7 @@ function FriendsList({ loading, error, friends, onAdd }) {
         </View>
       ) : (
         friends.map((f) => (
-          <View key={f.id} style={S.friendRow}>
+          <TouchableOpacity key={f.id} onPress={() => onOpenFriend(f)} style={S.friendRow} activeOpacity={0.8}>
             <View style={{ flexDirection: "row", alignItems: "center", gap: 10 }}>
               <Image source={{ uri: f.avatar_url }} style={S.friendAvatar} />
               <View>
@@ -454,53 +584,247 @@ function FriendsList({ loading, error, friends, onAdd }) {
                 <Text style={S.friendMeta}>100/100 (prior weeks): {f.wins}</Text>
               </View>
             </View>
-          </View>
+          </TouchableOpacity>
         ))
       )}
     </View>
   );
 }
 
-function AddFriendModal({ visible, onClose, onSubmit }) {
-  const [handle, setHandle] = useState("");
+/** Friend lineup modal (read-only, NFL) */
+function FriendLineupModal({ visible, onClose, friend, season, week }) {
+  const [loading, setLoading] = useState(true);
+  const [lineup, setLineup] = useState(null);
+  const [players, setPlayers] = useState([]);
+  const [stats, setStats] = useState({});
+  const [points, setPoints] = useState({});
+  const [err, setErr] = useState(null);
+
+  useEffect(() => {
+    let on = true;
+    (async () => {
+      if (!visible || !friend || !season || !week) return;
+      try {
+        setLoading(true); setErr(null);
+
+        const { data: rows, error: le } = await supabase
+          .from("lineups")
+          .select("qb, rb, wr, te, total_points, visibility")
+          .eq("user_id", friend.id)
+          .eq("season", season)
+          .eq("week", week)
+          .limit(1);
+        if (le) throw le;
+        const row = rows?.[0] ?? null;
+        setLineup(row);
+
+        const [pRes, sRes] = await Promise.all([
+          fetch(`${BASE_URL}/api/players?season=${season}`),
+          fetch(`${BASE_URL}/api/stats?season=${season}&week=${week}&mode=${MODE}`),
+        ]);
+
+        const pTxt = await pRes.text();
+        const sTxt = await sRes.text();
+        let pJson = null, sJson = null;
+        try { pJson = JSON.parse(pTxt); } catch (e) { throw new Error(`players JSON parse error: ${pTxt.slice(0,140)}`); }
+        try { sJson = JSON.parse(sTxt); } catch (e) { throw new Error(`stats JSON parse error: ${sTxt.slice(0,140)}`); }
+
+        if (!pRes.ok) throw new Error(pJson?.error || "Failed to load players");
+        if (!sRes.ok) throw new Error(sJson?.error || "Failed to load stats");
+        if (!on) return;
+        setPlayers(pJson.players || []);
+        setStats(sJson.stats || {});
+        setPoints(sJson.points || {});
+      } catch (e) {
+        if (on) setErr(String(e?.message || e));
+      } finally {
+        if (on) setLoading(false);
+      }
+    })();
+    return () => { on = false; };
+  }, [visible, friend, season, week]);
+
+  const byId = useMemo(() => {
+    const m = new Map();
+    for (const p of players) m.set(p.id, p);
+    return m;
+  }, [players]);
+
+  const getName = (id) => byId.get(id)?.name ?? "—";
+  const getTeam = (id) => byId.get(id)?.team ?? "NFL";
+  const getPos  = (id) => byId.get(id)?.pos ?? "";
+  const format = (id) => formatLine(stats[id]);
+  const pts = (id) => (points[id] != null ? Number(points[id]).toFixed(2) : null);
+
+  return (
+    <Modal visible={visible} animationType="slide" onRequestClose={onClose}>
+      <SafeAreaView style={{ flex: 1, backgroundColor: "#eef2ff" }} edges={['left','right','bottom']}>
+        <GradientHeader>
+          <TouchableOpacity onPress={onClose} style={S.smallBtn}><Text style={S.smallBtnTxt}>← Back</Text></TouchableOpacity>
+          <View style={{ flex: 1, alignItems: "center" }}>
+            <Text style={S.appTitle}>@{friend?.username ?? "friend"}</Text>
+            <Text style={S.appSub}>Week {week} · {MODE.toUpperCase()}</Text>
+          </View>
+          <View style={{ width: 64 }} />
+        </GradientHeader>
+
+        {loading ? (
+          <View style={S.center}><ActivityIndicator /><Text style={S.muted}>Loading lineup…</Text></View>
+        ) : err ? (
+          <View style={S.center}><Text style={S.error}>{err}</Text></View>
+        ) : !lineup ? (
+          <View style={S.center}><Text style={S.muted}>No lineup shared for this week.</Text></View>
+        ) : (
+          <View style={{ flex: 1, padding: 16, gap: 12 }}>
+            <ReadonlyCard
+              label="QB" gradient={["#60a5fa","#34d399"]}
+              name={getName(lineup.qb)} meta={`${getTeam(lineup.qb)} · ${getPos(lineup.qb)}`}
+              stats={format(lineup.qb)} points={pts(lineup.qb)}
+            />
+            <ReadonlyCard
+              label="RB" gradient={["#f59e0b","#ef4444"]}
+              name={getName(lineup.rb)} meta={`${getTeam(lineup.rb)} · ${getPos(lineup.rb)}`}
+              stats={format(lineup.rb)} points={pts(lineup.rb)}
+            />
+            <ReadonlyCard
+              label="WR" gradient={["#a78bfa","#22c55e"]}
+              name={getName(lineup.wr)} meta={`${getTeam(lineup.wr)} · ${getPos(lineup.wr)}`}
+              stats={format(lineup.wr)} points={pts(lineup.wr)}
+            />
+            <ReadonlyCard
+              label="TE" gradient={["#f472b6","#3b82f6"]}
+              name={getName(lineup.te)} meta={`${getTeam(lineup.te)} · ${getPos(lineup.te)}`}
+              stats={format(lineup.te)} points={pts(lineup.te)}
+            />
+
+            <View style={{ alignItems: "center", marginTop: 6 }}>
+              <Text style={{ color: "#0f172a", fontWeight: "900" }}>
+                Total: {[
+                  pts(lineup.qb), pts(lineup.rb), pts(lineup.wr), pts(lineup.te)
+                ].map(x => Number(x || 0)).reduce((a,b)=>a+b,0).toFixed(2)}
+              </Text>
+            </View>
+          </View>
+        )}
+      </SafeAreaView>
+    </Modal>
+  );
+}
+
+function ReadonlyCard({ label, gradient, name, meta, stats, points }) {
+  return (
+    <LinearGradient colors={gradient} start={{x:0,y:0}} end={{x:1,y:1}} style={[S.card, S.cardNarrow]}>
+      <View style={{ flexDirection: "row", justifyContent: "space-between", alignItems: "center" }}>
+        <Text style={S.cardLabel}>{label}</Text>
+      {points != null ? <Text style={S.cardPts}>{points}</Text> : null}
+      </View>
+      <Text style={S.cardName}>{name}</Text>
+      <Text style={S.cardMeta}>{meta}</Text>
+      <Text style={[S.cardStats, { marginTop: 6 }]} numberOfLines={1} ellipsizeMode="tail">{stats || "—"}</Text>
+    </LinearGradient>
+  );
+}
+
+/** Avatar customizer (unchanged) */
+function AvatarCustomizerModal({ visible, onClose, currentUrl, onSaved, user }) {
+  const [seed, setSeed] = useState("1");
+  const [bg, setBg] = useState("#0ea5e9");
+  const [body, setBody] = useState("#ffffff");
+
+  useEffect(() => {
+    try {
+      if (!currentUrl) return;
+      const url = new URL(currentUrl);
+      const params = new URLSearchParams(url.search);
+      const s = params.get("seed");
+      const bc = params.get("backgroundColor");
+      const sc = params.get("shapeColor");
+      if (s) setSeed(decodeURIComponent(s));
+      if (bc) setBg("#" + bc);
+      if (sc) setBody("#" + sc);
+    } catch {}
+  }, [currentUrl, visible]);
+
+  const preview = buildThumbUrl({ seed, bg, body });
+
+  const presets = ["1", "2", "3", "4", "5", "6", "7", "8"];
+  const paletteBg = ["#0ea5e9","#7c3aed","#06b6d4","#22c55e","#f59e0b","#ef4444","#111827","#e2e8f0"];
+  const paletteBody = ["#ffffff","#111827","#0ea5e9","#f59e0b","#ef4444","#22c55e","#a78bfa","#06b6d4"];
+
+  const save = async () => {
+    const url = buildThumbUrl({ seed, bg, body });
+    const { error } = await supabase
+      .from("profiles")
+      .update({ avatar_url: url })
+      .eq("id", user.id);
+    if (error) Alert.alert("Avatar", error.message);
+    else {
+      onSaved?.(url);
+      onClose();
+    }
+  };
+
   return (
     <Modal visible={visible} animationType="slide" onRequestClose={onClose} transparent>
       <View style={{ flex: 1, backgroundColor: "rgba(0,0,0,0.25)", justifyContent: "flex-end" }}>
-        <View style={S.addModal}>
-          <Text style={S.addTitle}>Add Friend</Text>
-          <Text style={S.muted}>Enter their @username</Text>
-          <TextInput
-            value={handle}
-            onChangeText={setHandle}
-            placeholder="@username"
-            autoCapitalize="none"
-            autoCorrect={false}
-            style={S.input}
-          />
-          <View style={{ flexDirection: "row", gap: 10, marginTop: 8 }}>
-            <TouchableOpacity onPress={onClose} style={[S.smallBtn,{ backgroundColor: "#e5e7eb" }]}><Text style={[S.smallBtnTxt,{ color:"#111827"}]}>Cancel</Text></TouchableOpacity>
-            <TouchableOpacity onPress={() => onSubmit(handle)} style={S.primaryBtn}><Text style={S.primaryBtnTxt}>Follow</Text></TouchableOpacity>
-          </View>
-        </View>
+        <KeyboardAvoidingView behavior={Platform.OS === "ios" ? "padding" : "height"} keyboardVerticalOffset={12}>
+          <TouchableWithoutFeedback onPress={Keyboard.dismiss}>
+            <View style={S.customModal}>
+              <Text style={S.addTitle}>Customize Avatar</Text>
+              <View style={{ alignItems: "center", marginVertical: 8 }}>
+                <Image source={{ uri: preview }} style={{ width: 96, height: 96, borderRadius: 48, borderWidth: 1, borderColor: "#e5e7eb" }} />
+              </View>
+
+              <Text style={[S.statTitle, { marginTop: 8 }]}>Preset (seed)</Text>
+              <ScrollView horizontal showsHorizontalScrollIndicator={false} contentContainerStyle={{ gap: 8, paddingVertical: 6 }}>
+                {presets.map((p) => (
+                  <TouchableOpacity key={p} onPress={() => setSeed(p)} style={[S.pill, seed === p && S.pillActive]}>
+                    <Text style={[S.pillTxt, seed === p && S.pillTxtActive]}>{p}</Text>
+                  </TouchableOpacity>
+                ))}
+              </ScrollView>
+
+              <Text style={[S.statTitle, { marginTop: 8 }]}>Background color</Text>
+              <View style={S.swatchRow}>
+                {paletteBg.map(c => (
+                  <TouchableOpacity key={c} onPress={() => setBg(c)} style={[S.swatch, { backgroundColor: c }, bg === c && S.swatchActive]} />
+                ))}
+              </View>
+
+              <Text style={[S.statTitle, { marginTop: 8 }]}>Avatar (body) color</Text>
+              <View style={S.swatchRow}>
+                {paletteBody.map(c => (
+                  <TouchableOpacity key={c} onPress={() => setBody(c)} style={[S.swatch, { backgroundColor: c }, body === c && S.swatchActive]} />
+                ))}
+              </View>
+
+              <View style={{ flexDirection: "row", gap: 10, marginTop: 12 }}>
+                <TouchableOpacity onPress={onClose} style={[S.smallBtn,{ backgroundColor: "#e5e7eb" }]}><Text style={[S.smallBtnTxt,{ color:"#111827"}]}>Cancel</Text></TouchableOpacity>
+                <TouchableOpacity onPress={save} style={S.primaryBtn}><Text style={S.primaryBtnTxt}>Save</Text></TouchableOpacity>
+              </View>
+            </View>
+          </TouchableWithoutFeedback>
+        </KeyboardAvoidingView>
       </View>
     </Modal>
   );
 }
 
 /** ===================== PICK (NFL) ===================== */
-function PickScreen({ goBack }) {
+function PickScreen({ goBack, draft, setDraft }) {
   const { user } = useAuth();
 
   const [players, setPlayers] = useState([]);
   const [points, setPoints] = useState({});
   const [stats, setStats] = useState({});
+  const [prevPoints, setPrevPoints] = useState({});
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState(null);
 
-  const [pickQB, setPickQB] = useState(null);
-  const [pickRB, setPickRB] = useState(null);
-  const [pickWR, setPickWR] = useState(null);
-  const [pickTE, setPickTE] = useState(null);
+  const [pickQB, setPickQB] = useState(draft.QB);
+  const [pickRB, setPickRB] = useState(draft.RB);
+  const [pickWR, setPickWR] = useState(draft.WR);
+  const [pickTE, setPickTE] = useState(draft.TE);
 
   const [pickerOpen, setPickerOpen] = useState(false);
   const [pickerPos, setPickerPos] = useState("QB");
@@ -509,39 +833,89 @@ function PickScreen({ goBack }) {
   const { season: SEASON, week: WEEK, loading: metaLoading, err: metaErr } = useLatestMeta();
 
   useEffect(() => {
+    setPickQB(draft.QB); setPickRB(draft.RB); setPickWR(draft.WR); setPickTE(draft.TE);
+  }, [draft.QB, draft.RB, draft.WR, draft.TE]);
+
+  useEffect(() => {
     let ok = true;
     if (!SEASON || !WEEK) return;
+
     (async () => {
       try {
         setLoading(true); setError(null);
-        const [pRes, sRes] = await Promise.all([
+
+        const prev = previousWeekOf(SEASON, WEEK);
+
+        const [pRes, sRes, sPrevRes] = await Promise.all([
           fetch(`${BASE_URL}/api/players?season=${SEASON}`),
           fetch(`${BASE_URL}/api/stats?season=${SEASON}&week=${WEEK}&mode=${MODE}`),
+          fetch(`${BASE_URL}/api/stats?season=${prev.season}&week=${prev.week}&mode=${MODE}`),
         ]);
-        const pJson = await pRes.json();
-        const sJson = await sRes.json();
-        if (!ok) return;
+
+        const pTxt = await pRes.text();
+        const sTxt = await sRes.text();
+        const sPrevTxt = await sPrevRes.text();
+
+        let pJson = null, sJson = null, sPrevJson = null;
+        try { pJson = JSON.parse(pTxt); } catch { throw new Error(`players JSON parse error: ${pTxt.slice(0,140)}`); }
+        try { sJson = JSON.parse(sTxt); } catch { throw new Error(`stats JSON parse error: ${sTxt.slice(0,140)}`); }
+        try { sPrevJson = JSON.parse(sPrevTxt); } catch { sPrevJson = {}; }
+
         if (!pRes.ok) throw new Error(pJson?.error || "Failed to load players");
         if (!sRes.ok) throw new Error(sJson?.error || "Failed to load stats");
+
         setPlayers(pJson.players || []);
         setPoints(sJson.points || {});
         setStats(sJson.stats || {});
+        setPrevPoints((sPrevJson && sPrevJson.points) ? sPrevJson.points : {});
       } catch (e) {
         setError(String(e?.message || e));
       } finally { if (ok) setLoading(false); }
     })();
+
     return () => { ok = false; };
   }, [SEASON, WEEK]);
 
   const pts = (id) => Number(points[id] ?? 0);
   const statLine = (id) => formatLine(stats[id]);
+  const prevPts = (id) => {
+    const v = prevPoints[id];
+    return (v === undefined || v === null) ? Number.NEGATIVE_INFINITY : Number(v);
+  };
 
   const poolByPos = useMemo(() => {
     const map = { QB: [], RB: [], WR: [], TE: [] };
     for (const p of players) if (map[p.pos]) map[p.pos].push(p);
-    for (const k of POS_ORDER) map[k].sort((a, b) => pts(b.id) - pts(a.id));
+    for (const k of POS_ORDER) {
+      map[k].sort((a, b) => {
+        const pa = prevPts(a.id), pb = prevPts(b.id);
+        if (pb !== pa) return pb - pa;
+        return a.name.localeCompare(b.name);
+      });
+    }
     return map;
-  }, [players, points]);
+  }, [players, prevPoints]);
+
+  const [query, setQuery] = useState("");
+  useEffect(() => {
+    if (pickerOpen) setQuery("");
+  }, [pickerOpen, pickerPos]);
+
+  const listForPos = useMemo(
+    () => (poolByPos && poolByPos[pickerPos]) ? poolByPos[pickerPos] : [],
+    [poolByPos, pickerPos]
+  );
+
+  const filtered = useMemo(() => {
+    const q = (query || "").trim().toLowerCase();
+    if (!q) return listForPos;
+    return listForPos.filter(p => {
+      const name = (p?.name || "").toLowerCase();
+      const team = (p?.team || "").toLowerCase();
+      const pos  = (p?.pos  || "").toLowerCase();
+      return name.includes(q) || team.includes(q) || pos.includes(q);
+    });
+  }, [listForPos, query]);
 
   const lockedByPos = {
     QB: pickQB ? hasStarted(stats[pickQB]) : false,
@@ -563,7 +937,16 @@ function PickScreen({ goBack }) {
     (pickWR ? pts(pickWR) : 0) +
     (pickTE ? pts(pickTE) : 0);
 
+  const choose = (pos, id) => {
+    if (pos === "QB") setPickQB(id);
+    if (pos === "RB") setPickRB(id);
+    if (pos === "WR") setPickWR(id);
+    if (pos === "TE") setPickTE(id);
+    setDraft(prev => ({ ...prev, [pos]: id }));
+  };
+
   const shareLineup = async () => {
+    const { user } = useAuth();
     if (!user) return setAuthOpen(true);
     if (!pickQB || !pickRB || !pickWR || !pickTE) return alert("Pick all 4 positions first.");
     const { error } = await supabase.from("lineups").insert({
@@ -577,7 +960,7 @@ function PickScreen({ goBack }) {
 
   if (metaLoading) {
     return (
-      <SafeAreaView style={S.center}>
+      <SafeAreaView style={S.center} edges={['left','right','bottom']}>
         <ActivityIndicator size="large" />
         <Text style={S.muted}>Loading current week…</Text>
       </SafeAreaView>
@@ -585,7 +968,7 @@ function PickScreen({ goBack }) {
   }
   if (metaErr || !SEASON || !WEEK) {
     return (
-      <SafeAreaView style={S.center}>
+      <SafeAreaView style={S.center} edges={['left','right','bottom']}>
         <Text style={S.title}>Couldn’t load current week</Text>
         <Text style={S.error}>{metaErr || "No meta returned"}</Text>
       </SafeAreaView>
@@ -593,7 +976,7 @@ function PickScreen({ goBack }) {
   }
   if (loading) {
     return (
-      <SafeAreaView style={S.center}>
+      <SafeAreaView style={S.center} edges={['left','right','bottom']}>
         <ActivityIndicator size="large" />
         <Text style={S.muted}>Loading from {BASE_URL}…</Text>
         <Text style={S.mono}>Season {SEASON} · Week {WEEK} · {MODE.toUpperCase()}</Text>
@@ -602,7 +985,7 @@ function PickScreen({ goBack }) {
   }
   if (error) {
     return (
-      <SafeAreaView style={S.center}>
+      <SafeAreaView style={S.center} edges={['left','right','bottom']}>
         <Text style={S.title}>Connection Error</Text>
         <Text style={S.error}>{error}</Text>
         <Text style={S.muted}>Check that the web app is running and BASE_URL is correct.</Text>
@@ -611,94 +994,403 @@ function PickScreen({ goBack }) {
   }
 
   return (
-    <SafeAreaView style={S.container}>
-      {/* Header with back + centered Week + total */}
-      <LinearGradient colors={["#7c3aed","#06b6d4"]} start={{x:0,y:0}} end={{x:1,y:1}} style={S.headerFull}>
+    <SafeAreaView style={S.container} edges={['left','right','bottom']}>
+      <GradientHeader>
         <View style={{ width: 72, alignItems: "flex-start" }}>
           <TouchableOpacity onPress={goBack} style={S.smallBtn}><Text style={S.smallBtnTxt}>← Home</Text></TouchableOpacity>
         </View>
         <View style={{ flex: 1, alignItems: "center", justifyContent: "center" }}>
           <Text style={S.weekBig}>Week {WEEK}</Text>
         </View>
-        <View style={{ width: 72, alignItems: "flex-end" }}>
-          <Text style={S.headerTotalTop}>Total</Text>
-          <Text style={S.headerTotal}>{total.toFixed(2)}</Text>
-        </View>
-      </LinearGradient>
+        <HeaderTotal value={total} />
+      </GradientHeader>
 
       <Card label="QB" gradient={["#60a5fa","#34d399"]}
         player={selected.QB} points={pickQB ? pts(pickQB).toFixed(2) : null}
         stats={pickQB ? statLine(pickQB) : null} locked={lockedByPos.QB}
         onPress={() => { if (!lockedByPos.QB) { setPickerPos("QB"); setPickerOpen(true); } }}
-        onClear={() => { if (!lockedByPos.QB) setPickQB(null); }} />
+        onClear={() => { if (!lockedByPos.QB) choose("QB", null); }} />
       <Card label="RB" gradient={["#f59e0b","#ef4444"]}
         player={selected.RB} points={pickRB ? pts(pickRB).toFixed(2) : null}
         stats={pickRB ? statLine(pickRB) : null} locked={lockedByPos.RB}
         onPress={() => { if (!lockedByPos.RB) { setPickerPos("RB"); setPickerOpen(true); } }}
-        onClear={() => { if (!lockedByPos.RB) setPickRB(null); }} />
+        onClear={() => { if (!lockedByPos.RB) choose("RB", null); }} />
       <Card label="WR" gradient={["#a78bfa","#22c55e"]}
         player={selected.WR} points={pickWR ? pts(pickWR).toFixed(2) : null}
         stats={pickWR ? statLine(pickWR) : null} locked={lockedByPos.WR}
         onPress={() => { if (!lockedByPos.WR) { setPickerPos("WR"); setPickerOpen(true); } }}
-        onClear={() => { if (!lockedByPos.WR) setPickWR(null); }} />
+        onClear={() => { if (!lockedByPos.WR) choose("WR", null); }} />
       <Card label="TE" gradient={["#f472b6","#3b82f6"]}
         player={selected.TE} points={pickTE ? pts(pickTE).toFixed(2) : null}
         stats={pickTE ? statLine(pickTE) : null} locked={lockedByPos.TE}
         onPress={() => { if (!lockedByPos.TE) { setPickerPos("TE"); setPickerOpen(true); } }}
-        onClear={() => { if (!lockedByPos.TE) setPickTE(null); }} />
+        onClear={() => { if (!lockedByPos.TE) choose("TE", null); }} />
 
       <TouchableOpacity onPress={shareLineup} style={S.shareBtn}>
-        <Text style={S.shareTxt}>{user ? "Share with Friends" : "Sign in to Share"}</Text>
+        <Text style={S.shareTxt}>Share with Friends</Text>
       </TouchableOpacity>
 
       {/* Player picker */}
-      <Modal visible={pickerOpen} animationType="slide" onRequestClose={() => setPickerOpen(false)}>
-        <SafeAreaView style={{ flex: 1, backgroundColor: "#0f172a" }}>
-          <View style={{ paddingHorizontal: 16, paddingVertical: 12 }}>
-            <Text style={{ color: "white", fontSize: 18, fontWeight: "700" }}>Select {pickerPos}</Text>
-          </View>
-          <FlatList
-            style={{ backgroundColor: "white", borderTopLeftRadius: 16, borderTopRightRadius: 16 }}
-            contentContainerStyle={{ padding: 12 }}
-            data={poolByPos[pickerPos] ?? []}
-            keyExtractor={(p) => p.id}
-            renderItem={({ item: p }) => {
-              const started = hasStarted(stats[p.id]);
-              return (
-                <TouchableOpacity
-                  style={[S.pickRow, started && { opacity: 0.5 }]}
-                  activeOpacity={started ? 1 : 0.8}
-                  onPress={() => {
-                    if (started) return;
-                    if (pickerPos === "QB") setPickQB(p.id);
-                    if (pickerPos === "RB") setPickRB(p.id);
-                    if (pickerPos === "WR") setPickWR(p.id);
-                    if (pickerPos === "TE") setPickTE(p.id);
-                    setPickerOpen(false);
-                  }}
-                >
-                  <View>
-                    <Text style={S.pickName}>{p.name}</Text>
-                    <Text style={S.pickMeta}>{p.team ?? "NFL"} · {p.pos}</Text>
-                  </View>
-                  <Text style={[S.pickPts, started && { color: "#64748b" }]}>
-                    {started ? "LOCKED" : (points[p.id] ?? 0).toFixed(2)}
-                  </Text>
-                </TouchableOpacity>
-              );
-            }}
-          />
-          <TouchableOpacity onPress={() => setPickerOpen(false)} style={{ padding: 16, alignItems: "center" }}>
-            <Text style={{ color: "white", fontWeight: "600" }}>Close</Text>
-          </TouchableOpacity>
-        </SafeAreaView>
-      </Modal>
+      <Modal
+        visible={pickerOpen}
+        animationType="slide"
+        onRequestClose={() => setPickerOpen(false)}
+        presentationStyle="fullScreen"
+        statusBarTranslucent={false}
+      >
+        <SafeAreaProvider initialMetrics={initialWindowMetrics}>
+          <SafeAreaView style={{ flex: 1, backgroundColor: "#0f172a" }} edges={['top','left','right','bottom']}>
+            <View style={{ paddingHorizontal: 16, paddingVertical: 12 }}>
+              <Text style={{ color: "white", fontSize: 18, fontWeight: "700" }}>
+                Select {pickerPos}
+              </Text>
+            </View>
 
-      {/* Auth modal */}
-      <Modal visible={authOpen} animationType="slide" onRequestClose={() => setAuthOpen(false)} transparent>
-        <View style={{ flex: 1, backgroundColor: "rgba(0,0,0,0.25)", justifyContent: "flex-end" }}>
-          <AuthModal onClose={() => setAuthOpen(false)} />
+            <FlatList
+              style={{ backgroundColor: "white", borderTopLeftRadius: 16, borderTopRightRadius: 16 }}
+              contentContainerStyle={{ paddingBottom: 12 }}
+              data={filtered}
+              keyExtractor={(p) => p.id}
+              stickyHeaderIndices={[0]}
+              ListHeaderComponent={
+                <View style={S.searchWrap}>
+                  <TextInput
+                    value={query}
+                    onChangeText={setQuery}
+                    placeholder={`Search ${pickerPos} by name or team…`}
+                    placeholderTextColor="#94a3b8"
+                    autoCapitalize="none"
+                    autoCorrect={false}
+                    returnKeyType="search"
+                    style={S.searchInput}
+                  />
+                  {query.length > 0 && (
+                    <TouchableOpacity onPress={() => setQuery("")} style={S.searchClear}>
+                      <Text style={{ color: "#64748b", fontWeight: "800" }}>×</Text>
+                    </TouchableOpacity>
+                  )}
+                </View>
+              }
+              renderItem={({ item: p }) => {
+                const started = hasStarted(stats[p.id]);
+                const lwRaw = prevPts(p.id);
+                const lastWeek = (lwRaw === Number.NEGATIVE_INFINITY ? 0 : lwRaw);
+                const live = pts(p.id);
+                const valueToShow = started ? live : lastWeek;
+
+                return (
+                  <TouchableOpacity
+                    style={[S.pickRow, started && { opacity: 0.65 }]}
+                    activeOpacity={started ? 1 : 0.8}
+                    onPress={() => {
+                      if (started) return;
+                      choose(pickerPos, p.id);
+                      setPickerOpen(false);
+                    }}
+                  >
+                    <View>
+                      <Text style={S.pickName}>{p.name}</Text>
+                      <Text style={S.pickMeta}>{p.team ?? "NFL"} · {p.pos}</Text>
+                    </View>
+                    <Text style={[S.pickPts, !started && { color: "#64748b" }]}>
+                      {valueToShow.toFixed(2)}
+                    </Text>
+                  </TouchableOpacity>
+                );
+              }}
+            />
+
+            <TouchableOpacity onPress={() => setPickerOpen(false)} style={{ padding: 16, alignItems: "center" }}>
+              <Text style={{ color: "white", fontWeight: "600" }}>Close</Text>
+            </TouchableOpacity>
+          </SafeAreaView>
+        </SafeAreaProvider>
+      </Modal>
+    </SafeAreaView>
+  );
+}
+
+function HeaderTotal({ value }) {
+  return (
+    <View style={{ width: 72, alignItems: "flex-end" }}>
+      <Text style={S.headerTotalTop}>Total</Text>
+      <Text style={S.headerTotal}>{value.toFixed(2)}</Text>
+    </View>
+  );
+}
+
+/** ===================== PICK (NBA) ===================== */
+function PickScreenNBA({ goBack }) {
+  const POS_NBA = ["C", "PF", "SF", "SG", "PG"];
+
+  const todayISO = new Date().toISOString().slice(0,10);
+  const [date, setDate] = useState(todayISO);
+
+  const [players, setPlayers] = useState([]);
+  const [points, setPoints] = useState({});
+  const [stats, setStats] = useState({});
+  const [loading, setLoading] = useState(true);
+  const [error, setError] = useState(null);
+
+  const [pickC, setPickC] = useState(null);
+  const [pickPF, setPickPF] = useState(null);
+  const [pickSF, setPickSF] = useState(null);
+  const [pickSG, setPickSG] = useState(null);
+  const [pickPG, setPickPG] = useState(null);
+
+  const [pickerOpen, setPickerOpen] = useState(false);
+  const [pickerPos, setPickerPos] = useState("C");
+
+  // load players
+  useEffect(() => {
+    let on = true;
+    (async () => {
+      try {
+        setLoading(true); setError(null);
+        const r = await fetch(`${BASE_URL}/api/nba/players`);
+        const txt = await r.text();
+        let j = null;
+        try { j = JSON.parse(txt); } catch { throw new Error(`Unexpected response (${r.status}). ${txt.slice(0,140)}`); }
+        if (!r.ok) throw new Error(j?.error || `players ${r.status}`);
+        if (!on) return;
+        setPlayers(j.players || []);
+      } catch (e) {
+        setError(String(e?.message || e));
+      } finally { if (on) setLoading(false); }
+    })();
+    return () => { on = false; };
+  }, []);
+
+  // load stats by date
+  useEffect(() => {
+    let on = true;
+    (async () => {
+      try {
+        setLoading(true); setError(null);
+        const r = await fetch(`${BASE_URL}/api/nba/stats?date=${encodeURIComponent(date)}`);
+        const txt = await r.text();
+        let j = null;
+        try { j = JSON.parse(txt); } catch { throw new Error(`Unexpected response (${r.status}). ${txt.slice(0,140)}`); }
+        if (!r.ok) throw new Error(j?.error || `stats ${r.status}`);
+        if (!on) return;
+        setPoints(j.points || {});
+        setStats(j.stats || {});
+      } catch (e) {
+        setError(String(e?.message || e));
+      } finally { if (on) setLoading(false); }
+    })();
+    return () => { on = false; };
+  }, [date]);
+
+  const pts = (id) => Number(points[id] ?? 0);
+  const hasStartedNBA = (id) => {
+    const s = stats[id]; if (!s) return false;
+    return !!(s.pts || s.reb || s.ast || s.stl || s.blk || s.tov || s.fg3m || s.min);
+  };
+
+  // map positions from API (C/F/G) into 5 slots
+  const poolByPos = useMemo(() => {
+    const map = { C:[], PF:[], SF:[], SG:[], PG:[] };
+    for (const p of players) {
+      if (p.posNBA === "C") map.C.push(p);
+      if (p.posNBA === "F") { map.PF.push(p); map.SF.push(p); }
+      if (p.posNBA === "G") { map.SG.push(p); map.PG.push(p); }
+    }
+    for (const k of POS_NBA) {
+      map[k].sort((a,b) => {
+        const db = pts(b.id) - pts(a.id);
+        return db !== 0 ? db : a.name.localeCompare(b.name);
+      });
+    }
+    return map;
+  }, [players, points]);
+
+  const selected = {
+    C:  pickC  ? players.find(p=>p.id===pickC)  : null,
+    PF: pickPF ? players.find(p=>p.id===pickPF) : null,
+    SF: pickSF ? players.find(p=>p.id===pickSF) : null,
+    SG: pickSG ? players.find(p=>p.id===pickSG) : null,
+    PG: pickPG ? players.find(p=>p.id===pickPG) : null,
+  };
+
+  const lockedByPos = {
+    C:  pickC  ? hasStartedNBA(pickC)  : false,
+    PF: pickPF ? hasStartedNBA(pickPF) : false,
+    SF: pickSF ? hasStartedNBA(pickSF) : false,
+    SG: pickSG ? hasStartedNBA(pickSG) : false,
+    PG: pickPG ? hasStartedNBA(pickPG) : false,
+  };
+
+  const formatLineNBA = (id) => {
+    const s = stats[id]; if (!s) return null;
+    const parts = [];
+    parts.push(`Pts ${s.pts}  Reb ${s.reb}  Ast ${s.ast}`);
+    if (s.stl || s.blk) parts.push(`Stl ${s.stl}  Blk ${s.blk}`);
+    parts.push(`3PM ${s.fg3m}  TOV ${s.tov}`);
+    return parts.join(" · ");
+  };
+
+  const total = (
+    (pickC  ? pts(pickC)  : 0) +
+    (pickPF ? pts(pickPF) : 0) +
+    (pickSF ? pts(pickSF) : 0) +
+    (pickSG ? pts(pickSG) : 0) +
+    (pickPG ? pts(pickPG) : 0)
+  );
+
+  const choose = (pos, id) => {
+    if (pos === "C")  setPickC(id);
+    if (pos === "PF") setPickPF(id);
+    if (pos === "SF") setPickSF(id);
+    if (pos === "SG") setPickSG(id);
+    if (pos === "PG") setPickPG(id);
+  };
+
+  const [query, setQuery] = useState("");
+  const listForPos = useMemo(() => poolByPos[pickerPos] || [], [poolByPos, pickerPos]);
+  const filtered = useMemo(() => {
+    const q = query.trim().toLowerCase();
+    if (!q) return listForPos;
+    return listForPos.filter(p =>
+      (p.name||"").toLowerCase().includes(q) ||
+      (p.team||"").toLowerCase().includes(q)
+    );
+  }, [listForPos, query]);
+
+  if (loading) {
+    return (
+      <SafeAreaView style={S.center} edges={['left','right','bottom']}>
+        <ActivityIndicator size="large" />
+        <Text style={S.muted}>Loading NBA slate for {date}…</Text>
+      </SafeAreaView>
+    );
+  }
+  if (error) {
+    return (
+      <SafeAreaView style={S.center} edges={['left','right','bottom']}>
+        <Text style={S.title}>Connection Error</Text>
+        <Text style={S.error}>{error}</Text>
+      </SafeAreaView>
+    );
+  }
+
+  return (
+    <SafeAreaView style={S.container} edges={['left','right','bottom']}>
+      <GradientHeader>
+        <View style={{ width: 72 }}>
+          <TouchableOpacity onPress={goBack} style={S.smallBtn}><Text style={S.smallBtnTxt}>← Home</Text></TouchableOpacity>
         </View>
+        <View style={{ flex: 1, alignItems: "center" }}>
+          <Text style={S.weekBig}>NBA · {date}</Text>
+        </View>
+        <HeaderTotal value={total} />
+      </GradientHeader>
+
+      {/* date control */}
+      <View style={{ alignItems: "center", marginTop: -6 }}>
+        <View style={{ flexDirection: "row", gap: 8, alignItems: "center" }}>
+          <Text style={S.muted}>Game Date:</Text>
+          <TextInput
+            value={date}
+            onChangeText={setDate}
+            placeholder="YYYY-MM-DD"
+            autoCapitalize="none"
+            autoCorrect={false}
+            style={[S.input,{backgroundColor:"#fff", minWidth: 130, paddingVertical: 6}]}
+          />
+        </View>
+      </View>
+
+      {/* cards */}
+      <Card label="C"  gradient={["#60a5fa","#34d399"]}
+        player={selected.C} points={pickC ? pts(pickC).toFixed(2) : null}
+        stats={pickC ? formatLineNBA(pickC) : null} locked={lockedByPos.C}
+        onPress={() => { if (!lockedByPos.C) { setPickerPos("C"); setPickerOpen(true); } }}
+        onClear={() => { if (!lockedByPos.C) choose("C", null); }} />
+      <Card label="PF" gradient={["#f59e0b","#ef4444"]}
+        player={selected.PF} points={pickPF ? pts(pickPF).toFixed(2) : null}
+        stats={pickPF ? formatLineNBA(pickPF) : null} locked={lockedByPos.PF}
+        onPress={() => { if (!lockedByPos.PF) { setPickerPos("PF"); setPickerOpen(true); } }}
+        onClear={() => { if (!lockedByPos.PF) choose("PF", null); }} />
+      <Card label="SF" gradient={["#a78bfa","#22c55e"]}
+        player={selected.SF} points={pickSF ? pts(pickSF).toFixed(2) : null}
+        stats={pickSF ? formatLineNBA(pickSF) : null} locked={lockedByPos.SF}
+        onPress={() => { if (!lockedByPos.SF) { setPickerPos("SF"); setPickerOpen(true); } }}
+        onClear={() => { if (!lockedByPos.SF) choose("SF", null); }} />
+      <Card label="SG" gradient={["#f472b6","#3b82f6"]}
+        player={selected.SG} points={pickSG ? pts(pickSG).toFixed(2) : null}
+        stats={pickSG ? formatLineNBA(pickSG) : null} locked={lockedByPos.SG}
+        onPress={() => { if (!lockedByPos.SG) { setPickerPos("SG"); setPickerOpen(true); } }}
+        onClear={() => { if (!lockedByPos.SG) choose("SG", null); }} />
+      <Card label="PG" gradient={["#06b6d4","#7c3aed"]}
+        player={selected.PG} points={pickPG ? pts(pickPG).toFixed(2) : null}
+        stats={pickPG ? formatLineNBA(pickPG) : null} locked={lockedByPos.PG}
+        onPress={() => { if (!lockedByPos.PG) { setPickerPos("PG"); setPickerOpen(true); } }}
+        onClear={() => { if (!lockedByPos.PG) choose("PG", null); }} />
+
+      {/* Picker modal */}
+      <Modal visible={pickerOpen} animationType="slide" onRequestClose={() => setPickerOpen(false)} presentationStyle="fullScreen">
+        <SafeAreaProvider initialMetrics={initialWindowMetrics}>
+          <SafeAreaView style={{ flex: 1, backgroundColor: "#0f172a" }} edges={['top','left','right','bottom']}>
+            <View style={{ paddingHorizontal: 16, paddingVertical: 12 }}>
+              <Text style={{ color: "white", fontSize: 18, fontWeight: "700" }}>
+                Select {pickerPos}
+              </Text>
+            </View>
+            <FlatList
+              style={{ backgroundColor: "white", borderTopLeftRadius: 16, borderTopRightRadius: 16 }}
+              contentContainerStyle={{ paddingBottom: 12 }}
+              data={filtered}
+              keyExtractor={(p) => p.id}
+              stickyHeaderIndices={[0]}
+              ListHeaderComponent={
+                <View style={S.searchWrap}>
+                  <TextInput
+                    value={query}
+                    onChangeText={setQuery}
+                    placeholder={`Search ${pickerPos} by name or team…`}
+                    placeholderTextColor="#94a3b8"
+                    autoCapitalize="none"
+                    autoCorrect={false}
+                    returnKeyType="search"
+                    style={S.searchInput}
+                  />
+                  {query.length > 0 && (
+                    <TouchableOpacity onPress={() => setQuery("")} style={S.searchClear}>
+                      <Text style={{ color: "#64748b", fontWeight: "800" }}>×</Text>
+                    </TouchableOpacity>
+                  )}
+                </View>
+              }
+              renderItem={({ item: p }) => {
+                const started = hasStartedNBA(p.id);
+                const live = pts(p.id);
+                return (
+                  <TouchableOpacity
+                    style={[S.pickRow, started && { opacity: 0.65 }]}
+                    activeOpacity={started ? 1 : 0.8}
+                    onPress={() => {
+                      if (started) return;
+                      choose(pickerPos, p.id);
+                      setPickerOpen(false);
+                    }}
+                  >
+                    <View>
+                      <Text style={S.pickName}>{p.name}</Text>
+                      <Text style={S.pickMeta}>{(p.team ?? "NBA")} · {p.posNBA}</Text>
+                    </View>
+                    <Text style={[S.pickPts, !started && { color: "#64748b" }]}>
+                      {live.toFixed(2)}
+                    </Text>
+                  </TouchableOpacity>
+                );
+              }}
+            />
+            <TouchableOpacity onPress={() => setPickerOpen(false)} style={{ padding: 16, alignItems: "center" }}>
+              <Text style={{ color: "white", fontWeight: "600" }}>Close</Text>
+            </TouchableOpacity>
+          </SafeAreaView>
+        </SafeAreaProvider>
       </Modal>
     </SafeAreaView>
   );
@@ -724,10 +1416,10 @@ function Card({ label, gradient, player, points, stats, locked, onPress, onClear
         {player ? (
           <>
             <Text style={S.cardName}>{player.name}</Text>
-            <Text style={S.cardMeta}>{player.team ?? "NFL"} · {player.pos}</Text>
+            <Text style={S.cardMeta}>{player.team ?? (label === "C" || label === "PF" || label === "SF" || label === "SG" || label === "PG" ? "NBA" : "NFL")} · {player.pos ?? player.posNBA}</Text>
             <View style={S.statRow}>
               <Text style={S.cardStats} numberOfLines={1} ellipsizeMode="tail" adjustsFontSizeToFit minimumFontScale={0.92}>
-                {stats}
+                {stats || "—"}
               </Text>
               {!locked && (
                 <TouchableOpacity onPress={onClear} style={S.clearInlineBtn}>
@@ -743,6 +1435,7 @@ function Card({ label, gradient, player, points, stats, locked, onPress, onClear
     </TouchableOpacity>
   );
 }
+
 function formatLine(s) {
   if (!s) return "—";
   const parts = [];
@@ -763,8 +1456,13 @@ const S = StyleSheet.create({
   error: { fontSize: 13, color: "#b91c1c", textAlign: "center", paddingHorizontal: 24 },
 
   headerFull: {
-    marginHorizontal: -16, paddingHorizontal: 16, paddingTop: 12, paddingBottom: 16,
-    flexDirection: "row", justifyContent: "space-between", alignItems: "flex-start", gap: 12,
+    marginHorizontal: -16,
+    paddingHorizontal: 16,
+    paddingBottom: 16,
+    flexDirection: "row",
+    justifyContent: "space-between",
+    alignItems: "flex-start",
+    gap: 12,
   },
   appTitle: { color: "white", fontSize: 24, fontWeight: "800" },
   appSub: { color: "white", opacity: 0.9, marginTop: 2, fontWeight: "600" },
@@ -801,7 +1499,7 @@ const S = StyleSheet.create({
   // Add Friend modal
   addModal: {
     backgroundColor: "white", padding: 16, borderTopLeftRadius: 16, borderTopRightRadius: 16,
-    borderWidth: StyleSheet.hairlineWidth, borderColor: "#e5e7eb",
+    borderWidth: StyleSheet.hairlineWidth, borderColor: "#e2e8f0",
   },
   addTitle: { fontSize: 18, fontWeight: "900", color: "#0f172a", marginBottom: 6 },
   input: {
@@ -842,6 +1540,34 @@ const S = StyleSheet.create({
   shareBtn: { alignSelf: "center", marginTop: 6, backgroundColor: "#0ea5e9", paddingHorizontal: 14, paddingVertical: 10, borderRadius: 12 },
   shareTxt: { color: "white", fontWeight: "800" },
 
-  // header tweak for big week
   weekBig: { color: "white", fontSize: 30, fontWeight: "900", letterSpacing: 0.5 },
+  searchWrap: {
+    paddingHorizontal: 12, paddingVertical: 10, backgroundColor: "white",
+    borderTopLeftRadius: 16, borderTopRightRadius: 16,
+    borderBottomWidth: StyleSheet.hairlineWidth, borderBottomColor: "#e2e8f0",
+  },
+  searchInput: {
+    height: 40, backgroundColor: "#f1f5f9", borderRadius: 10,
+    paddingHorizontal: 12, fontSize: 14, color: "#0f172a",
+  },
+  searchClear: {
+    position: "absolute", right: 18, top: 16, width: 24, height: 24, alignItems: "center", justifyContent: "center",
+  },
+
+  // Avatar customizer
+  customModal: {
+    backgroundColor: "white", padding: 16, borderTopLeftRadius: 16, borderTopRightRadius: 16,
+    borderWidth: StyleSheet.hairlineWidth, borderColor: "#e2e8f0",
+  },
+  pill: {
+    paddingHorizontal: 12, paddingVertical: 8, backgroundColor: "#e5e7eb", borderRadius: 999,
+  },
+  pillActive: { backgroundColor: "#0ea5e9" },
+  pillTxt: { color: "#0f172a", fontWeight: "700" },
+  pillTxtActive: { color: "white" },
+  swatchRow: { flexDirection: "row", flexWrap: "wrap", gap: 8, marginTop: 6 },
+  swatch: { width: 28, height: 28, borderRadius: 14, borderWidth: 1, borderColor: "#e2e8f0" },
+  swatchActive: { borderColor: "#0ea5e9", borderWidth: 2 },
 });
+
+/* end file */

@@ -4,20 +4,30 @@
   "main": "index.js",
   "scripts": {
     "start": "expo start",
-    "android": "expo start --android",
-    "ios": "expo start --ios",
+    "android": "expo run:android",
+    "ios": "expo run:ios",
     "web": "expo start --web"
   },
   "dependencies": {
-    "@react-native-async-storage/async-storage": "2.2.0",
-    "@supabase/supabase-js": "^2.78.0",
-    "expo": "~54.0.22",
+    "@react-native-async-storage/async-storage": "^2.2.0",
+    "@supabase/supabase-js": "^2.80.0",
+    "expo": "54.0.22",
+    "expo-constants": "~18.0.10",
+    "expo-dev-client": "~6.0.17",
     "expo-linear-gradient": "~15.0.7",
     "expo-status-bar": "~3.0.8",
+    "expo-updates": "~29.0.12",
     "react": "19.1.0",
     "react-native": "0.81.5",
+    "react-native-get-random-values": "^2.0.0",
     "react-native-safe-area-context": "~5.6.0",
     "react-native-url-polyfill": "^3.0.0"
   },
-  "private": true
+  "private": true,
+  "resolutions": {
+    "minimatch": "5.1.6"
+  },
+  "devDependencies": {
+    "@expo/ngrok": "^4.1.3"
+  }
 }
